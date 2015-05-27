@@ -1,0 +1,41 @@
+SUMMARY:
+
+   The  purpose  of fpx3 is to simplify Fortran source code develop­
+   ment with an integrated set of macros,  directives  and  embedded
+   Perl/Fortran.   Most  common tasks can be done without Perl back­
+   ground using the documented examples.  For  sophisticated  source
+   code  transformations  Perls broad functionality can be used. Em­
+   bedded Fortran can  be  used  for  general  data  initialization.
+   There  is  support for Fortran context sensitive macros and local
+   name spaces.  Structural and dependency  information  for  subse­
+   quent tools can be generated.
+
+LAST VERSION:
+
+   0.20
+
+CHANGES:
+   0.20: bug-fixes, new macros: map2, used_modules
+   0.19: bug-fixes, map-macro
+   0.18: init macro for used modules
+   0.17: support for line control
+   0.16: access to numeric models
+   0.15: support for embedded fortran
+   0.14: extended documentation
+   0.13: port to windows
+   0.12: first public version
+
+INSTALL:
+
+   Fpx3 requires perl5. You can find out the installed Perl version
+   with `perl -v`. On unix systems you may have to adjust the first
+   line of the fpx3 script so that it points to the Perl interpreter.
+   On Windows systems it is simplest to call fpx3 as `perl fpx3` or
+   generate fpx3.bat with pl2bat that comes with ActivePerl.
+
+COPYRIGHT:
+
+   Copyright (c) 2002, Jörg Behrens. All rights reserved.
+   Fpx3 is free software; you can redistribute it and/or
+   modify it under the same terms as Perl itself.
+

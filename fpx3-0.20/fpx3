@@ -1,0 +1,4057 @@
+#!/usr/bin/perl -w
+#
+# fpx3: Fortran Preprocessor with embedded Perl
+#
+# Copyright (c) 2002, Jörg Behrens. All rights reserved.
+#
+# This program is free software; you can redistribute it
+# and/or modify it under the same terms as Perl itself.
+#
+#
+#
+# Please send bugs and hints to jbehren at gwdg dot de
+# (translate at and dot, ignore whitespace).
+#
+#//========================================================================
+
+
+package fpx3_io;
+
+BEGIN {
+  $INC{'fpx3_io.pm'}=1;
+
+  require 5.000;
+  if ($^O =~ /win/i) {
+    $windows=1;
+    $dirsep="\\";
+    $pathsep=";";
+  } else {
+    $windows=0;
+    $dirsep="/";
+    $pathsep=":";
+  }
+
+  $debug ||= 0;
+
+  #//use simple type-blind import function
+  sub import {
+    my $pkg = shift;
+    my $callpkg = caller;
+    my $sym;
+
+    #//evtl autoexport self
+    if (!defined(&{"$callpkg\::import"})) {
+      *{"$callpkg\::import"} = \&{"$pkg\::import"};
+      print STDERR "auto-export $pkg -> $callpkg : import\n" if $debug;
+    }
+
+    for $sym (@_) {
+      die "$pkg\::import method cannot handle $sym" unless $sym =~ /^\w/;
+      *{"$callpkg\::$sym"} = *{"$pkg\::$sym"};
+      print STDERR "export $pkg -> $callpkg : $sym\n" if $debug;
+    }
+  }
+
+  $file_name="";
+  $line_num=0;
+  $file_count=0;
+  $file="";
+  @file_stack=();
+  $raw_line="";
+  @scan_buf=();
+  $line_control=0;
+  $have_exercised=0;
+}
+
+sub msg {
+  print STDERR "fpx3: @_\n";
+}
+
+sub eof_err {
+  err("unexpected end of file");
+}
+
+sub err {
+  my @con=caller(1);
+  for my $t (@con) { $t="(?)" unless defined $t };
+  print STDERR "fpx3 error:file $file_name, line $line_num\n";
+  print STDERR "@_\n";
+  &fpx3_ml::clear_lc($raw_line);
+  print STDERR $raw_line;
+  print STDERR "context:@con\n" if @con;
+  exit(1);
+}
+
+sub open_file {
+  $file_count++;
+  $file="FILE$file_count";
+  $line_num=0;
+  open($file,"< $file_name") || err("cannot open $file_name");
+}
+
+sub open_named_file {
+  if ($file_name) {
+    my @cp=@scan_buf;
+    @scan_buf=();
+    push @file_stack,[$file_name,$file,$line_num,\@cp];
+  }
+  $file_name=$_[0];
+  open_file();
+}
+
+sub cut_stream {
+  @scan_buf=();
+  $file="";
+}
+
+sub push_file_stack {
+
+  if ($file_name) {
+    my @cp=@scan_buf;
+    push @file_stack,[$file_name, $file, $line_num, \@cp];
+  }
+
+  push @file_stack,@_;
+
+  @scan_buf=();
+  $file="";
+
+}
+
+sub read_raw_line {
+  my $scan_ref;
+
+  if ($file) {
+    $raw_line=<$file>;
+    if (eof($file)) {
+      $raw_line .= "\n" if ($raw_line && $raw_line !~ /\n/);
+      &$fpx3_user::eof_hook() if defined $fpx3_user::eof_hook;
+    }
+
+    $line_num++;
+    if ( defined $raw_line ) {
+      if ($line_control) {
+	if ($raw_line !~ /^\s*$/) {
+	  chomp($raw_line);
+	  #// syntax #line ddd name is not understood always
+	  $raw_line .= "!#_lc$line_num $file_name\n";
+	  #$raw_line .= "!#_lc$line_num\n";
+	}
+      }
+      if ( ! $have_exercised ) {
+	if ($raw_line =~ /\$[ilrz]\d*_(kind|bit_size|digits|huge|radix|range|epsilon|maxexponent|minexponent|tiny)/ ) {
+	  #print STDERR "info: access to numeric model:\n";
+	  #print STDERR $raw_line;
+	  fpx3_std::exercise();
+	  $have_exercised=1;
+	}
+      }
+      return $raw_line;
+    }
+    close($file);
+    $file="";
+  }
+
+  return undef unless @file_stack;
+
+  err("read_raw_line:unexpected case") if @scan_buf;
+  ($file_name,$file,$line_num,$scan_ref)= @{pop @file_stack};
+  #//print "new file_set:$file_name,$file,$line_num,$scan_ref\n";
+  @scan_buf=@$scan_ref;
+
+  open_file() unless $file;
+
+  return read_raw_line();
+}
+
+#//========================================================================
+#//FPX3_ML: macro lexer
+package fpx3_ml;
+use fpx3_io qw( err read_raw_line scan_buf );
+
+BEGIN {
+  $INC{'fpx3_ml.pm'}=1;
+
+
+  @symbols= qw( and_t any_t subarg_t assign_t code_t colon_t comma_t comment_t
+		cond_t eol_t f_break_t for_t line_mac_t mac_t numeric_t other_t
+		par1a_t par1b_t perl_t q1_t q2_t
+		semico_t space_t stack_t string_t void_t word_t );
+
+  $sym_num=0;
+  $sym_doc[0]="end_of_source";
+  $sym_tv=0;
+
+  for ( @symbols ) {
+    $sym_num++;
+    $$_=$sym_num;
+    $sym_doc[$sym_num]=$_;
+    #print "$sym_num => $_ \n";
+  }
+
+
+  $fixed_form=undef;
+  $ignore_quotes=0;
+
+}
+
+sub show_scan_buf {
+  my $tv;
+  print "<<<\n";
+  for $tv (reverse @scan_buf) {
+    print("{",$sym_doc[$$tv[0]],":", $$tv[1],"}");
+  }
+  print ">>>\n";
+}
+
+sub scan_next_line {
+  my $tv;
+  my $s;
+  my @buf=();
+  my $scanner;
+  my @head=();
+  my $tail=0;
+  my $p;
+
+  local $_=read_raw_line();
+
+  if (!defined) {
+    push @scan_buf,[0,""];
+    return;
+  };
+
+  if ( (defined($fixed_form) && /^[cCdD!*]/) || /^!/ ) {
+    my $v=$_;
+    chomp($v);
+    push @scan_buf,([$eol_t,"\n"],[$comment_t,$v]);
+    return;
+  }
+
+
+  while (1) {
+    if ( /\G\$/gc ) {
+      if ( /\G([a-zA-Z_]\w*)/gc or /\G{\s*([a-zA-Z_]\w*)\s*}/gc ) {
+	$m=$1;
+	if (  not defined $fixed_form ) {
+	  #//special scanner directives
+	  if ( ($fpx3_io::line_control && /\G([-*+])[ \t]*!#_lc\d+.*\n/gc) ||
+	       /\G([-*+])[ \t]*\n/gc ) {
+	    if ($1 eq "+" ) {
+	      @head=([$cond_t,"if"],[$perl_t,"(defined \$$m)"]);
+	    } elsif ($1 eq "-" ) {
+	      $tail=[$cond_t,"endif"];
+	    } else {
+	      @head=([$cond_t,"if"],[$perl_t,"(defined \$$m)"]);
+	      $tail=[$cond_t,"endif"];
+	    }
+	    push @buf, ([$eol_t,"\n"]);
+	    next;
+	  }
+	}
+	if ( defined( $scanner = $sms{$m} ) ) {
+	  $tv=&$scanner;
+	  if ($$tv[0] == $stack_t) {
+	    push @buf,reverse @{$$tv[1]}
+	  } else {
+	    push @buf,$tv;
+	  }
+	  next;
+	}
+	push @buf,[$mac_t, $m];
+      } elsif (/\G{/gc ) {
+	err("Bad macro name.");
+      } elsif ( /\G([*#(:\$\"])/gc ) {
+	$scanner = $sms{$1};
+	push @buf,&$scanner;
+	next;
+      } elsif ( /\G(\d+)/gc ) {
+	push @buf,[$subarg_t,$1];
+	next;
+      }
+    } else {
+      $tv=std_scan();
+      err("sic @$tv") if ($tv && ! defined $$tv[0]);
+      last unless $tv;
+      push @buf,$tv;
+    }
+  }
+
+  push @scan_buf, $tail if $tail;
+  push @scan_buf, reverse @buf;
+  push @scan_buf, reverse @head if @head;
+
+  return 1;
+}
+
+
+sub scan_to_mark {
+  my $mark=shift;
+  my $label=shift || "";
+  my $v="";
+  my $p;
+
+  _clear_lc() if $fpx3_io::line_control;
+
+  while (1) {
+
+    #//next line needed?
+    /\G$/gc && do {
+      $_=read_raw_line();
+      _clear_lc() if $fpx3_io::line_control;
+      err("unexpected end of file") unless defined;
+    };
+
+    #//check mark
+    #/\G\$(undiscard|endquote|endperl|endeval|endfval|endfprog)/gc && do {
+    /\G\$($mark)/gc && do {
+      #if ( $1 ne $mark) {
+      #$v .= "\$$1";
+      #next;
+      #}
+      return $v unless $label;
+
+      #// check label
+      my $x=$1;
+      my $p=pos();
+      return $v if ( /\G[ \t]+(\S+)/gc && $1 eq $label );
+
+      pos()=$p;
+      $v .= "\$$x";
+      next;
+    };
+
+    #//collect
+    /\G([^\$]+)/gc && do {
+      $v .= $1;
+      next;
+    };
+
+    #//collect rest
+    /\G(.)/gc && do {
+      $v .= $1;
+      next;
+    }
+
+  }
+
+}
+
+
+sub get_comment_tail { #//without eol
+  return $1 if /\G(.+)/gc;
+  return "";
+}
+
+
+sub get_string_tail {
+  my $q=shift;
+  my $v="";
+  my $start=$_;
+  my $snum=$fpx3_io::line_num;
+
+  clear_lc($start);
+  chomp($start);
+  _clear_lc();
+
+
+ X:while (1) {
+
+
+    /\G(""|'')/gc && do {
+      $v .= $1;
+      next X;
+    };
+
+    m/\G('|")/gc && do { #'
+      $v .= $1;
+      return $v if $1 eq $q;
+      next X;
+    };
+
+    /\G([^'"]+)/gc && do { #'
+      $v .= $1;
+      next X;
+    };
+
+    # handle continued lines
+    # string may contain comments
+    if ( $fixed_form) {
+    Y:while (1) {
+	$_=read_raw_line();
+	_clear_lc();
+	last Y if /^     \S/;
+	err("Cannot find continuation of string at line $snum [$start].") unless /^(\S|$)/;
+      };
+      next X;
+    } else {
+      if ( $v =~ /&\s*$/gc ) {
+      Z:while (1) {
+	  $_=read_raw_line();
+	  _clear_lc();
+	  last Z if /^\s*&/;
+	  err("Cannot find continuation of string at line $snum [$start].") unless /^\s*(!|$)/;
+	  $v .= $_;
+	};
+	next X;
+      };
+    }
+
+    err("Cannot find end of string.");
+  }
+}
+
+sub _clear_lc {
+  my $p;
+  $p=pos();
+  s/!#_lc\d+.*\n/\n/ && do { pos()=$p };
+}
+
+sub clear_lc {
+  my $p;
+  $p=pos($_[0]);
+  $_[0] =~ s/!#_lc\d+.*$// && do { pos($_[0])=$p };
+}
+
+sub scan_to_par1b {
+  my $v="";
+  my $state=1;
+
+
+  _clear_lc() if $fpx3_io::line_control;
+
+
+  while (1) {
+
+    #//next line needed?
+    /\G$/gc && do {
+      $_=read_raw_line();
+      _clear_lc() if $fpx3_io::line_control;
+      err("unexpected end of file") unless defined;
+    };
+
+    #// do not check for strings, scanner works in perl env
+    #// /\G('|")/gc && do {
+    #//  $v .=  $1 . get_string_tail($1);
+    #// }
+
+    #//quoted parentheses
+    /\G(\\[()])/gc && do {
+      $v .= $1;
+      next;
+    };
+
+    #//update state
+    /\G\(/gc && do {
+      $state++;
+      $v .= '(';
+      next;
+    };
+
+    /\G\)/gc && do {
+      $state--;
+      return $v unless $state;
+      $v .= ')';
+      next;
+    };
+
+    #//collect
+    /\G([^\\()]+)/gc && do {
+      $v .= $1;
+      next;
+    };
+
+    #//collect rest
+    /\G(.)/sgc && do {
+      $v .= $1;
+      next;
+    }
+
+  }
+
+}
+
+sub aux_sms_cond {
+  my ($name,$mod)=@_;
+
+  _clear_lc() if $fpx3_io::line_control;
+
+  /\G[ \t]*/gc;
+  /\G\(/gc &&
+    return [$stack_t,[
+		      [$perl_t,"( $mod " . scan_to_par1b() . ')'],
+		      [$cond_t,$name]
+		     ]];
+
+
+
+  /\G(.+)/gc &&
+    return [$stack_t,[
+		      [$perl_t,"( $mod " . $1 . ')'],
+		      [$cond_t,$name]
+		     ]];
+}
+
+
+sub BEGIN {
+  #//scattered macro scanner:
+  $sms{'discard'}=sub {
+    my $label=undef;
+
+    _clear_lc() if $fpx3_io::line_control;
+
+    #if ($fpx3_io::line_control) {
+    #  $label = $1 if /\G[ \t]+(\S+)!#_lc\d+\n/gc;
+    #} else {
+    #  $label = $1 if /\G[ \t]+(\S+)[ \t]*\n/gc;
+    #}
+
+    $label = $1 if /\G[ \t]+(\S+)[ \t]*\n/gc;
+    scan_to_mark('undiscard',$label);
+    [$void_t,''];
+  };
+
+  $sms{'quote'}=sub { [$any_t,scan_to_mark('end\s*quote')] };
+
+  $sms{'if'}=sub { aux_sms_cond('if','') };
+  $sms{'ifdef'}=sub { aux_sms_cond('if' ,'defined') };
+  $sms{'ifndef'}=sub { aux_sms_cond('if','! defined') };
+  $sms{'elsif'}= sub { aux_sms_cond('elsif','') };
+  $sms{'elseif'}= $sms{'elsif'};
+  $sms{'else'}= sub { [$cond_t,'else'] };
+  $sms{'endif'}= sub { [$cond_t,'endif'] };
+
+  $sms{'LHS'}= sub { [$mac_t,'LHS'] };
+
+  $sms{'eval'}= sub {
+    /\G\(/gc && return [$perl_t,scan_to_par1b()];
+    /\G:(.+)/gc && return [$perl_t,$1];
+    return [$perl_t,scan_to_mark('end\s*eval')];
+  };
+
+  $sms{'fval'}= sub {
+    my $t;
+    my $r="";
+    if ( /\G\(/gc ) {
+      $t=scan_to_par1b();
+    } elsif (  /\G:(.+)/gc ) {
+      $t=$1;
+    } else {
+      $t=scan_to_mark('end\s*fval')
+    }
+    /\G(.*)/sgc;
+    $_='$fprog print*,' . $t . ' $endfprog$()' . $1;
+    return [$void_t,''];
+  };
+
+
+
+  $sms{'('}= sub {
+    /\G[ \t]*\)/gc && return [$void_t,''];
+    return [$perl_t,scan_to_par1b()];
+  };
+
+  $sms{':'}= sub {
+    /\G(.+)/gc && return [$perl_t,$1];
+    err("empty perl source");
+  };
+
+  $sms{'"'}= sub {
+    my ($t,$p,$r);
+    $t=get_string_tail("\"");
+    chop($t);
+    /\G(.*)/sgc;
+    $_='$str(' . $t . ')' . $1;
+    return [$void_t,''];
+  };
+
+
+  $sms{'perl'}= sub {
+    my $t;
+    my $add=';return "";';
+    /\G\(/gc && return [$perl_t,scan_to_par1b() . $add];
+    /\G:(.+)/gc && return [$perl_t,$1 . $add];
+    $t=[$perl_t,scan_to_mark('end\s*perl') . $add];
+    return $t;
+  };
+
+  $sms{'end'}=  sub {
+    if ( /\G[ \t]*(attribute|block|eval|fval|fprog|if|perl|quote|silence|sub)/gc ) {
+      return $sms{"end$1"} if defined $sms{"end$1"};
+      return [$mac_t,"end$1"];
+    }
+    return [$mac_t,'end'];
+  };
+
+  $sms{'*'}= sub { [$mac_t,"sub_arg_list"] };
+
+  $sms{'#'}= sub { [$mac_t,"sub_arg_num"] };
+
+  @sss= map $other_t,(0..255);
+  $sss[ord '&']= $and_t;
+  $sss[ord '=']= $assign_t;
+  $sss[ord ',']= $comma_t;
+  $sss[ord ':']= $colon_t;
+  $sss[ord "\n"]= $eol_t;
+  $sss[ord '(']= $par1a_t;
+  $sss[ord ')']= $par1b_t;
+  $sss[ord "\'"]= $q1_t;
+  $sss[ord "\""]= $q2_t;
+  $sss[ord ';']= $semico_t;
+  $sss[ord "\r"]= $void_t;
+  $sss[ord "\f"]= $void_t;
+
+}
+
+sub ignore_quotes {
+  $sss[ord "\'"]=  $other_t;
+  $sss[ord "\""]=  $other_t;
+
+}
+
+
+sub std_scan {
+  /\G(\d+)/gc && return [$numeric_t, $1];
+  /\G(\w+)/gc && return [$word_t, $1];
+  /\G([ \t]+)/gc && return [$space_t, $1];
+
+  if (not $ignore_quotes) {
+    /\G"/gc && return [$string_t, "\"" . get_string_tail("\"")];
+    /\G'/gc && return [$string_t, "\'" . get_string_tail("\'")]; #'
+  }
+  /\G!/gc && return [$comment_t, '!' . get_comment_tail()];
+  /\G(\/=|==)/gc &&  return [$other_t, $1];
+  /\G(.)/sgc && return [$sss[ord $1], $1];
+
+  return 0;
+}
+
+sub next_sym {
+  scan_next_line() unless @scan_buf;
+  $sym_tv=pop @scan_buf;
+  #print "next_sym:[@$sym_tv]\n";
+  return $$sym_tv[0];
+}
+
+
+
+#//========================================================================
+#//FPX3_MP: macro parser
+package fpx3_mp;
+use fpx3_io qw( err );
+use fpx3_ml ( @fpx3_ml::symbols,
+	      qw( clear_lc scan_buf scan_next_line next_sym sym_doc sym_tv ) );
+
+BEGIN {
+  $INC{'fpx3_mp.pm'}=1;
+
+  $sym_tv=[];
+  #//$sym_t=0;
+  #//$$sym_tv[1]="";
+
+
+  %active=(
+	   subarg_t         =>  \&proc_arg,
+	   code_t           =>  \&proc_code,
+	   cond_t           =>  \&proc_cond,
+	   stack_t          =>  \&proc_stack,
+	   mac_t            =>  \&proc_mac,
+	   perl_t           =>  \&proc_perl,
+	  );
+  {
+    my $n;
+    for ( keys %active ) {
+      $n=$$_;
+      $active[$n]=$active{$_};
+      $sym_doc[$n] .= " (active) ";
+    }
+  }
+
+  @cond_buf=();
+  $cond_true=0;
+}
+
+
+
+sub match {
+  scan_next_line() unless @scan_buf;
+  return undef unless $_[0] == $scan_buf[$#scan_buf][0];
+  $sym_tv=pop @scan_buf;
+  ##print("[",$sym_doc[$$sym_tv[0]],":", $$sym_tv[1],"]");
+  return $$sym_tv[0];
+}
+
+
+sub unmatch {
+  if ( @_ ) {
+    push @scan_buf, @_;
+  } else {
+    push @scan_buf, $sym_tv;
+  }
+  return;
+}
+
+
+
+sub next_cond {
+  my $level=0;
+
+  while (next_sym()) {
+    push @cond_buf,$sym_tv if $cond_true;
+    next unless $$sym_tv[0] == $cond_t;
+
+    if ($$sym_tv[1] eq "if") {
+      $level++;
+      #print "level=$level\n";
+      next;
+    }
+
+    last unless $level;
+
+    if ($$sym_tv[1] eq "endif") {
+      $level--;
+      #print "level=$level\n";
+      next;
+    }
+  }
+
+  err("unexpected end of input in conditional") if $level;
+  pop @cond_buf if $cond_true;
+  return $$sym_tv[0];
+}
+
+
+sub proc_cond {
+  my $any_true;
+
+  $cond_true=0;
+  @cond_buf=();
+
+  err("unexpected macro:\$",$$sym_tv[1]) unless $$sym_tv[1] eq "if";
+
+  match($space_t);
+  match($perl_t) || err("Cannot parse condition.");
+  #// if
+  proc_perl();
+  $cond_true=$$sym_tv[1];
+  $any_true=$cond_true;
+  next_cond();
+  #//multiple elsif
+  while (1) {
+    last unless ($$sym_tv[1] eq "elsif" );
+    if ($any_true) {
+      $cond_true=0;
+    } else {
+      match($perl_t) || err("Cannot parse condition.");
+      proc_perl();
+      $cond_true=$$sym_tv[1];
+      $any_true=$cond_true;
+    }
+    next_cond();
+  }
+  #// else
+  if ($$sym_tv[1] eq "else") {
+    $cond_true=! $any_true;
+    next_cond();
+  }
+  #// endif ( may be missing )
+  err("proc_cond:unexpected case:$$sym_tv[1]") unless $$sym_tv[1] eq "endif";
+
+  push @scan_buf,reverse @cond_buf;
+
+  $sym_tv=[$void_t,''];
+  return $void_t;
+}
+
+
+
+sub proc_perl {
+  my ($r,$src);
+  my $old_context;
+  err("perl source code expected") unless $$sym_tv[0] == $perl_t;
+
+
+  if ($$sym_tv[1]) {
+    $src=$$sym_tv[1];
+    {
+      package fpx3_user;
+      my $old_warn=$SIG{__WARN__};
+
+      $SIG{__WARN__}=sub {
+	die "fpx3: received warning inside eval:\n@_";
+	#//fpx3_io::err(@_);
+      };
+
+      $src =~ s/!#_lc\d+.*\n/\n/ if $fpx3_io::line_control;
+      $old_context=$fpx3_std::fpx3_context;
+      $fpx3_std::fpx3_context="perl";
+      $r=eval($src);
+      $fpx3_std::fpx3_context=$old_context;
+      $SIG{__WARN__}=$old_warn;
+      fpx3_io::err("$@") if $@;
+
+    }
+    $r="" unless $r;
+    $sym_tv=[$any_t,$r];
+  } else {
+    $sym_tv=[$void_t,''];
+  }
+  return $$sym_tv[0];
+}
+
+
+sub get_args {
+  my @a;
+  my ($t,$state,$v);
+  ##fpx3_ml::show_scan_buf();
+  $t=match($space_t);
+  if ( ! match($par1a_t) ) {
+    unmatch() if $t;
+    return ();
+  }
+
+  return () if match($par1b_t);
+
+  $state=1;
+  $v="";
+  @a=();
+  match($space_t);
+  while ( next_cooked() ) {
+
+    if ( $$sym_tv[0] == $code_t ) {
+      # functional arguments not working yet
+      ##err("arguments must be constants");
+      # rest never reached
+      err("bad expression - expected pure functional argument") if $v;
+      push @a,$$sym_tv[1];
+      match($space_t);
+      match($comma_t) && next;
+      match($par1b_t) || err("bad expression");
+      $state=0;
+      last;
+    }
+
+
+    if ( $$sym_tv[0] == $par1a_t ) {
+      $v .= "(" . rest_in_bracket() . ")";
+      next;
+    }
+
+    if ( $$sym_tv[0] == $comma_t ) {
+      push @a,$v;
+      $v="";
+      next;
+    }
+
+    if ( $$sym_tv[0] == $par1b_t ) {
+      $state=0;
+      push @a,$v;
+      last;
+    }
+
+    $v .= $$sym_tv[1];
+
+  }
+
+  err("get_args: unexpected end of macro arguments") if $state;
+
+  return @a;
+}
+
+
+sub expand_list {
+  # each input element is taken as a comma separated list,
+  # we split the elements and return one big list
+
+  local $_;
+  my ($p,$s,$v,@a);
+
+  $p=0;    # par-level
+  $sbc=""; # string-boundary-char
+
+
+  @a=();
+  $v="";
+ E:for (@_) { #loop over elements
+    #print "[_]=[$_]\n";
+  C:while (1) { #loop over chars
+
+      # handle strings
+
+      /\G(""|'')/gc && do {
+	$v .= $1;
+	next C;
+      };
+
+      # from here: only single-char decisions
+      if ( /\G(.)/sgc ) {
+	$c=$1;
+	#print "[c],pos=[$c]" . pos() . "\n";
+      } else {
+	last C;
+      }
+
+
+      $c eq "'" or $c eq '"' && do { #'
+	if ($sbc) {
+	  $sbc="" if $c eq $sbc;
+	} else {
+	  $sbc=$c;
+	}
+	$v .= $c;
+	next C;
+      };
+
+      if ($sbc) {
+	$v .= $c;
+	next C;
+      }
+
+      # now we are outside strings
+
+      if ($c eq "(") {
+	$p++;
+	$v .= $c;
+	next C;
+      } elsif ($c eq ")") {
+	$p--;
+	$v .= $c;
+	err("fpx3-error: detected unbalanced parentheses in expression: $_") if $p<0;
+	next C;
+      } elsif ($p>0) {
+	$v .= $c;
+	next C;
+      }
+
+      # now we are outside parentheses
+
+      if ($c eq "," ) {
+	push @a,$v;
+	$v="";
+	next C;
+      }
+
+      $v .= $c;
+
+
+    } #C
+    push @a,$v if $v;
+    $v="";
+  } #E
+
+  return @a;
+}
+
+sub take_one {
+  my @a=get_args();
+  err("argument expected") unless @a;
+  err("unexpected number of arguments: @a") unless scalar(@a) == 1;
+  return pop @a;
+}
+
+
+sub mval {
+  my $m=shift;
+  my ($v,$ref,$obj);
+
+  package fpx3_user;
+  if ($obj=tied($$m)) {
+    $v=$obj->FETCH(); #workround for buggy recursion with tie
+  } else {
+    $v=$$m;
+    fpx3_io::err("undefined macro:\$$m") unless defined $v;
+    return $v unless $ref=ref($v);
+    return &$v($m) if $ref eq "CODE";
+    if (ref($v) eq "ARRAY") {
+      push @fpx3_ml::scan_buf, @$v;
+      return "";
+    }
+    err("unexpected reference:$ref");
+  }
+
+}
+
+
+sub next_cooked {
+  my $proc;
+  next_sym();
+  &{$proc} if defined( $proc=$active[$$sym_tv[0]] );
+  return $$sym_tv[0];
+}
+
+
+sub proc_mac {
+  #print("proc_mac:[",$sym_doc[$$sym_tv[0]],":", $$sym_tv[1],"]\n");
+  my $m=$$sym_tv[1];
+  my $v=mval($m);
+
+  err("macro $m returns an undefined value") unless defined $v;
+  $sym_tv=[$any_t,$v];
+  if ( ref($$sym_tv[1]) ) {
+    err("unexpected reference type " . ref($$sym_tv[1]))
+      unless ref($$sym_tv[1]) eq "CODE";
+    $$sym_tv[0]=$code_t;
+  } elsif ( $$sym_tv[1] eq "" ) {
+    $$sym_tv[0]=$void_t;
+  }
+  return $$sym_tv[0];
+}
+
+sub proc_code {
+  my $sub=$$sym_tv[1];
+  my ($t,$v);
+  $v=&$sub();
+  if ( ref($v) ) {
+    err("unexpected reference type " . ref($$sym_tv[1]))
+      unless ref($v) eq "CODE";
+    $t=$code_t;
+  } elsif ( $v eq "" ) {
+    $t=$void_t;
+  } else {
+    $t=$any_t;
+  }
+  $sym_tv=[$t,$v];
+  return $t;
+}
+
+sub proc_stack {
+  push @scan_buf,@{$$sym_tv[1]};
+  $sym_tv=[$void_t,''];
+  return $void_t;
+}
+
+sub proc_arg {
+  my $n=$$sym_tv[1];
+  my $v;
+
+  {
+    package fpx3_user;
+    if ($n <= $#sub_arg) {
+      $v=$sub_arg[$n];
+    } else {
+      $v="";
+    }
+  }
+
+  if (ref($v) eq "CODE") {
+    $sym_tv=[$code_t,$v];
+  } else {
+    $sym_tv=[$any_t,$v];
+  }
+
+  return $$sym_tv[0];
+}
+
+
+sub next_val { #//next value of line
+  my $v="";
+
+  match($space_t);
+
+  while (next_cooked()) {
+    last if ( $$sym_tv[0] == $space_t || $$sym_tv[0] == $eol_t ||
+	      $$sym_tv[0] == $comma_t || $$sym_tv[0] == $par1b_t );
+
+    if ( $$sym_tv[0] == $code_t ) {
+      err("Cannot combine text with code reference.") if $v;
+      return $$sym_tv[1];
+    }
+
+    if ( $$sym_tv[0] == $par1a_t ) {
+      $v .= "(" . rest_in_bracket() . ")";
+      next;
+    }
+
+    $v .= $$sym_tv[1];
+  }
+
+  unmatch();
+
+  clear_lc($v) if $fpx3_io::line_control;
+
+  return $v;
+}
+
+sub val_of_restline {
+  my $s;
+  my $v="";
+
+  match($space_t);
+
+  while (next_cooked()) {
+    last if $$sym_tv[0] == $eol_t;
+
+    if ( $$sym_tv[0] == $code_t ) {
+      err("Cannot combine text with code reference.") if $v;
+      return $$sym_tv[1];
+    }
+
+    if ( $$sym_tv[0] == $par1a_t ) {
+      $v .= "(" . rest_in_bracket() . ")";
+      next;
+    }
+
+    $v .= $$sym_tv[1];
+  }
+
+  unmatch();
+
+  clear_lc($v) if $fpx3_io::line_control;
+
+  return $v;
+}
+
+sub next_val_of_list {
+  my $v="";
+
+  match($space_t);
+
+  while (next_cooked()) {
+
+    last if ( $$sym_tv[0] == $comma_t || $$sym_tv[0] == $par1b_t );
+
+    if ( $$sym_tv[0] == $code_t ) {
+      err("Cannot combine constant with functional.") if $v;
+      return $$sym_tv[1];
+    }
+
+    if ( $$sym_tv[0] == $par1a_t ) {
+      $v .= "(" . rest_in_bracket() . ")";
+      next;
+    }
+
+    $v .= $$sym_tv[1];
+  }
+
+  return $v;
+}
+
+sub mac_val_pairs {
+  my ($m,$v);
+  my @a=();
+  my $pos=1;
+
+
+  while (1) {
+
+    last if $$sym_tv[0] == $par1b_t;
+
+    match($space_t);
+    match($mac_t) || err("macro expected");
+    $m=$$sym_tv[1];
+    match($space_t);
+    match($comma_t) || err("comma expected");
+
+    $v=next_val_of_list();
+
+    push @a,[$m,$v];
+
+  }
+
+  return @a;
+}
+
+
+sub rest_in_bracket {
+  my $state=1;
+  my $v="";
+
+
+  while ( next_cooked() ) {
+
+    if ($$sym_tv[0] == $par1a_t) {
+      $state++;
+      $v .= $$sym_tv[1];
+      next;
+    }
+
+    if ($$sym_tv[0] == $par1b_t ) {
+      $state-- ;
+      last unless $state;
+      $v .= $$sym_tv[1];
+      next;
+    }
+
+    $v .= $$sym_tv[1];
+  }
+
+  err("unexpected end of block") if $state;
+  return $v;
+}
+
+#//========================================================================
+#//FPX3_MAC: macro class
+package fpx3_mac;
+BEGIN {
+  $INC{'fpx3_mac.pm'}=1;
+}
+
+sub TIESCALAR {
+  my $self = shift;
+  my $v = shift;
+  $v="" unless defined($v);
+  #print STDERR "TIESCALAR: bless \\$v, $self\n";
+  return bless \$v, $self;
+}
+
+sub FETCH {
+  my $ref = shift;
+  my $v;
+  die "fpx3_mac::FETCH called with argument of wrong type" unless ref $ref;
+  $v=$$ref;
+  #print("FTECH: [",ref($ref),"]  $ref to $v\n");
+  if (ref($v) eq "CODE") {
+    #print("follow code\n");
+    $v=&$v();
+  } elsif (ref($v)) {
+    die "fpx3_mac::FETCH unexpected reference type:" . ref($v);
+  }
+  return $v;
+}
+
+sub STORE {
+  my $ref = shift;
+  my $v = shift;
+  die "wrong type" unless ref $ref;
+  $$ref=$v;
+}
+
+sub raw_val {
+  my $r = shift;
+  die "fpx3_mac::raw_val called with argument of wrong type" unless ref $r;
+  return $$r;
+}
+
+sub execute {
+  my $r = shift;
+  die "fpx3_mac::execute called with argument of wrong type" unless ref $r;
+  my $v=$$r;
+  die "fpx3_mac::execute failed" unless ref($v) eq "CODE";
+  return &$v(@_);
+}
+
+
+#//========================================================================
+#//FPX3_STD:standard macros
+package fpx3_std;
+use Cwd;
+use fpx3_io qw(cut_stream err msg line_num push_file_stack);
+use fpx3_ml ( @fpx3_ml::symbols, qw( fixed_form scan_buf next_sym  sym_tv ) );
+use fpx3_mp qw( mac_val_pairs match next_val rest_in_bracket
+		next_cooked val_of_restline get_args expand_list take_one );
+
+BEGIN {
+  $INC{'fpx3_std.pm'}=1;
+  sub xmacro (@) {
+    my $m=shift;
+    my $a=$_[0];
+    #print STDERR "xmacro: \$m=$m, \$a=$a, \@_=@_\n";
+    $$m=$a if ref($a) eq "CODE";
+    tie $$m, 'fpx3_mac', @_;
+    *{"fpx3_user\::$m"} = *{"fpx3_std\::$m"};
+  }
+
+  $hostname=`hostname`;
+  chomp($hostname);
+  $used_fkey="";
+
+  @attribute_stack=();
+  %include_dep=();
+  $include_path=cwd();
+  if ($fpx3_io::dirsep eq "\\") {
+    $include_path =~ s/\//\\/g;
+  }
+  $block_level=0;
+  $fprog_level=0;
+  $silence_level=0;
+  @context=();
+  @saved_mac_spaces=();
+  @saved_sub_args=();
+  %include_dep=();
+  $max_line_length=132;
+  $real_cwd = cwd();
+
+  if ($ENV{HOME}) {
+    chdir();
+    $real_home = cwd();
+    chdir($real_cwd);
+    $real_cwd =~ s/$real_home/~/;
+  } else {
+    $real_home=undef;
+  }
+  if ($fpx3_io::windows) {
+    $real_cwd =~ s/\//\\/g;
+  }
+
+  $fpx3_context="stream";
+  $map_arg="";
+
+};
+
+
+xmacro 'remove_module_dep', sub {
+  my ($m,@a,$msg);
+
+  @a=get_args();
+  $msg="";
+  for $m (@a) {
+    package fpx3_user;
+    if (not  $local_use{$m}) {
+      print STDERR "cannot remove module <$m> from dependency list, it is not there.\n";
+      &fpx3_io::err("error");
+    }
+    delete $local_use{$m};
+    delete $fpx3_fp::module_dep{$m};
+    $msg .= "! removed module <$m> from dependency list\n";
+
+    #my @local_used=keys(%local_use);
+    #my @global_used=keys(%fpx3_fp::module_dep);
+    #$msg .= "!left_local: @local_used\n";
+    #$msg .= "!left_global: @global_used\n";
+
+  }
+  $msg .= "\n";
+};
+
+xmacro 'init_modules', sub {
+  my ($s,$m,@a,$t);
+
+  @a=get_args();
+  $t=join(',',@a);
+  $s="\n";
+  {
+    package fpx3_user;
+    foreach $m (sort {$local_use{$a} <=> $local_use{$b} } keys %local_use) {
+      $s .= "      call init_$m($t)\n";
+    }
+    %local_use=();
+  }
+  return $s;
+};
+
+xmacro 'used_modules', sub {
+  my ($s,$m,@a,$t);
+
+  $s="";
+  {
+    package fpx3_user;
+    foreach $m (sort {$local_use{$a} <=> $local_use{$b} } keys %local_use) {
+      $s .= "," if $s;
+      $s .= $m;
+    }
+  }
+  return $s;
+};
+
+
+xmacro 'context_doc', sub {
+  my ($s,$t);
+
+  $s="";
+  foreach $t (@context) {
+    $s .= ':' if $s;
+    $s .= $t;
+  }
+  $s = "main" unless $s;
+  $s = "<$s>" if $s;
+  return $s;
+};
+
+
+xmacro 'platform', sub {
+  my $e=$ENV{PLATFORM};
+  return $e if $e;
+  return $^O;
+};
+
+#print STDERR "a: hostname=$hostname\n";
+xmacro 'hostname', $hostname;
+
+xmacro 'newline', "\n";
+
+xmacro 'sub_arg_list', sub {
+  err("undefined macro") unless defined @sub_arg;
+  return join(',',@sub_arg) if @sub_arg; #including $0
+  #return join(',',@sub_arg[1 .. $#sub_arg]) if @sub_arg; #excluding $0
+  return "";
+};
+
+xmacro 'shift', sub {
+  err("undefined macro") unless defined @sub_arg;
+  return shift @sub_arg || "";
+};
+
+xmacro 'sub_arg_num',  sub {
+  err("undefined macro") unless defined @sub_arg;
+  return "$#sub_arg";
+};
+
+
+xmacro 'rem', sub {
+  1 while next_sym() != $eol_t;
+  push @fpx3_ml::scan_buf,$sym_tv;
+  return "";
+};
+
+xmacro 'Id', sub { # ignore RCS Id
+  1 while next_sym() != $eol_t;
+  push @fpx3_ml::scan_buf,$sym_tv;
+  return "";
+};
+
+xmacro 'dnl', sub {
+  1 while next_sym() != $eol_t;
+  return "";
+};
+
+xmacro 'env', sub {
+  my $t=take_one() ||  err("bad argument for env macro");
+  return $ENV{$t};
+};
+
+xmacro 'eof', sub {
+  cut_stream();
+  return "";
+};
+
+xmacro 'define', sub {
+  my ($m,$v);
+  my @a;
+
+  match($space_t);
+
+  if (match($par1a_t)) {
+    @a=mac_val_pairs();
+    err("macro expected") unless @a;
+    for (@a) {
+      ($m,$v)=@$_;
+      #xmacro $m, $v;
+      { package fpx3_user; $$m=$v; }
+      #$$m=$v;
+    }
+    return "";
+  }
+
+  err("macro expected") unless next_sym() == $mac_t;
+  $m=$$sym_tv[1];
+  $v=val_of_restline();
+  #xmacro $m, "$v";
+  { package fpx3_user; $$m=$v; }
+  return "";
+};
+
+xmacro 'undefine', sub {
+  my $m;
+  match($space_t);
+  match($mac_t) || err("macro expected");
+  $m=$$sym_tv[1];
+  {
+    package fpx3_user;
+    #untie($$m) if tied($$m);;
+    $$m=undef;
+  }
+  return "";
+};
+
+xmacro 'local', sub {
+  my ($m,$v);
+  my @a;
+  my $save=$saved_mac_spaces[$#saved_mac_spaces];
+
+  err("Cannot use local in this context.") unless $save;
+
+  match($space_t);
+  if (match($par1a_t)) {
+    @a=mac_val_pairs();
+    err("macro expected") unless @a;
+  } else {
+    err("macro expected") unless next_sym() == $mac_t;
+    $m=$$sym_tv[1];
+    $v=val_of_restline();
+    @a=([$m,$v]);
+  }
+
+  {
+    for (@a) {
+      ($m,$v)=@$_;
+      err("repeated \$local for \$$m in same scope") if
+	defined ${$save}{$m};
+      package fpx3_user;
+      if (tied($$m)) {
+	${$save}{$m}=tied($$m)->raw_val();
+      } elsif (defined $$m) {
+	${$save}{$m}=$$m;
+      } else {
+	${$save}{$m}=undef;
+      }
+      { package fpx3_user; $$m=$v; }
+      #fpx3_std::xmacro $m, $v;
+      #$$m=$v;
+    }
+  }
+
+
+
+  return "";
+};
+
+sub prepare_locals {
+  push @saved_mac_spaces,{};
+  return "";
+}
+
+sub remove_locals {
+  my $m;
+  my $save=pop @saved_mac_spaces || return "";
+  package fpx3_user;
+  for $m (keys %{$save}) {
+    $$m=${$save}{$m};
+    #xmacro $m, ${$save}{$m};
+  }
+  return "";
+}
+
+
+xmacro 'sub', sub {
+  my @body=();
+  my $level=1;
+
+  push @body, [$code_t,
+	       sub {
+		 my $ref;
+		 #//prepare locals
+		 push @saved_mac_spaces,{};
+		 return "";
+	       }
+	      ];
+
+
+  #//collect functional
+  while ( next_sym() ) {
+    if ( $$sym_tv[0] == $mac_t ) {
+      if ($$sym_tv[1] eq "sub") {
+	$level++;
+      } elsif ($$sym_tv[1] eq "endsub") {
+	$level--;
+	last unless $level;
+      }
+    }
+    push @body,$sym_tv;
+  }
+
+  err("unmatched \$sub") if $level;
+
+  push @body, [$code_t,
+	       sub {
+		 my $ref;
+
+		 #//removal of local macros
+		 remove_locals();
+
+		 #//removal of local sub_args
+		 $ref=pop @saved_sub_args || err("internal error in \$sub macro");
+		 @sub_arg=@$ref;
+		 return "";
+	       }
+	      ];
+
+
+  @body=reverse @body;
+
+
+
+  return sub {
+    my $name=$$sym_tv[1];
+    my @args=@_;
+
+    if ($fpx3_context eq "perl") {
+      push @scan_buf, [$code_t,
+		       sub {
+			 my $name;
+			 $name="perl_call";
+			 push @saved_sub_args,[@sub_arg];
+			 @sub_arg=($name,@args);
+			 push @scan_buf, @body;
+			 return "";
+		       }
+		      ];
+    } elsif ($fpx3_context eq "map") {
+      my $ma=$map_arg;
+      push @scan_buf, [$code_t,
+		       sub {
+			 push @saved_sub_args,[@sub_arg];
+			 @sub_arg=('map_sub',$ma);
+			 push @scan_buf, @body;
+			 return "";
+		       }
+		      ];
+
+    } else {
+      push @scan_buf, [$code_t,
+		       sub {
+			 push @saved_sub_args,[@sub_arg];
+			 @sub_arg=($name,get_args());
+			 push @scan_buf, @body;
+			 return "";
+		       }
+		      ];
+    }
+    return "";
+  };
+
+  return "";
+};
+
+
+xmacro 'map', sub {
+  my @a=@_; @a=get_args() unless @a;
+  my $s=shift(@a);
+  my $x;
+  err("first argument of map must be functional") if (not ref($s));
+  $fpx3_context="map";
+  for $x (reverse @a) {
+    $map_arg=$x;
+    &$s();
+  }
+  return "";
+};
+
+
+xmacro 'map2', sub {
+  my @a=@_; @a=get_args() unless @a;
+  my $s=shift(@a);
+  my $x;
+
+
+  err("first argument of map must be functional") if (not ref($s));
+  $fpx3_context="map";
+
+  @a=expand_list(@a);
+  for $x (reverse @a) {
+    $map_arg=$x;
+    &$s();
+  }
+  return "";
+};
+
+
+
+xmacro 'block', sub {
+  my @body=();
+  my $level=$block_level++;
+  my $v="";
+
+  #//prepare locals
+  push @saved_mac_spaces,{};
+
+  #//collect block;
+  while ( next_cooked() ) {
+    last if $block_level==$level;
+    $v .= $$sym_tv[1];
+  }
+  err("unmatched \$block") if $level != $block_level;
+
+  #//removal of local macros
+  remove_locals();
+  return $v;
+};
+
+sub rm_ftmp {
+  my ($fi,$fo)=@_[0..1];
+  my $line;
+
+  die "unexpected case" unless $fi;
+  err("Strange: Cannot remove tmpfile $fi - it does not exist.") unless -e $fi;
+  open(FOR_HD,"$fi") || err("Cannot open tmpfile ${fi}.");
+  $line=<FOR_HD>;
+  err("Unexpected header in tmpfile ${fi}.") unless $line =~ /^!tmpfile for fpx3/;
+  close FOR_HD;
+  unlink $fi;
+  if ($fo) {
+    err("Strange: Cannot remove tmpfile $fo - it does not exist.") unless -e $fo;
+    unlink $fo;
+  }
+}
+
+sub gen_ftmp {
+  my $t="_t_fpx3t";
+  my $dir="";
+  $t .= $$ if $$;
+  my $n=0;
+  my ($fi,$fo);
+
+  $t="/tmp/$t" unless $^O =~ /win/i;
+  ($fi,$fo)=("$t$n.f","$t$n.x");
+
+
+  while ( (-e $fi || -e $fo ) && $n < 16) {
+    $n++;
+    ($fi,$fo)=("$t$n.f","$t$n.x");
+  }
+  err("Cannot generate tmpfile.") if -e $fi;
+  err("Cannot generate tmpfile.") if -e $fo;
+
+  open(FOR_HD,"> $fi") || err("Cannot open tmpfile ${fi}.");
+  print FOR_HD "!tmpfile for fpx3 - should disappear automatically\n";
+
+  return ($fi,$fo);
+}
+
+sub fcmd {
+  my $cmd;
+
+  package fpx3_user;
+  if ( $FC_CMD ) {
+    $cmd=$FC_CMD;
+    fpx3_io::err("INPUT or OUTPUT are missing in $cmd")
+      unless ($cmd =~ /INPUT/ && $cmd =~ /OUTPUT/);
+  } elsif ( $FC ) {
+    if ( $FC_ARGS ) {
+      $cmd="$FC $FC_ARGS -o OUTPUT INPUT";
+    } else {
+      $cmd="$FC -o OUTPUT INPUT";
+    }
+  } elsif ( $ENV{FC_CMD} ) {
+    $cmd=$ENV{FC_CMD};
+  } elsif ( $ENV{FC} ) {
+    if ( defined $ENV{FC_ARGS} ) {
+      $cmd="$ENV{FC} $ENV{FC_ARGS} -o OUTPUT INPUT";
+    } else {
+      $cmd="$ENV{FC} -o OUTPUT INPUT";
+    }
+  } else {
+    if ( $platform =~ /linux/i ) {
+      $cmd="pgf90 -Mfree -o OUTPUT INPUT";
+    } elsif ( $platform =~ /ibm/i ) {
+      $cmd="xlf95 -o OUTPUT INPUT";
+    } elsif ( $platform =~ /alpha/i ) {
+      $cmd="f95 -free -o OUTPUT INPUT";
+    } else {
+      $cmd="f90 -o OUTPUT INPUT";
+    }
+  }
+
+  return $cmd;
+}
+
+sub fcomp {
+  my ($fi,$fo,$err_handle)=@_;
+  my ($cmd,$result);
+  #print STDERR "fcomp: fi=$fi, fo=$fo \n";
+  $cmd=fcmd();
+
+  #avoid some special cases
+  $cmd =~ s/mpxlf/xlf/;
+
+  $cmd =~ s/INPUT/$fi/g;
+  $cmd =~ s/OUTPUT/$fo/g;
+  print STDERR "compiling:$cmd\n" if $fpx3_io::debug;
+  if ($^O =~ /win/i) {
+    $result=`$cmd`;
+  } else {
+    #print STDERR "$cmd 2>&1\n";
+    $result=`$cmd 2>&1`;
+  }
+
+
+  if ($?) {
+    print STDERR $result if $result;
+    if ($err_handle) {
+      &$err_handle();
+    } else {
+      err("Cannot compile embedded Fortran program $fi with ${cmd}.");
+    }
+  }
+
+  return $cmd;
+}
+
+xmacro 'silence', sub {
+  my $level=$silence_level++;
+
+  #//collect body;
+  while ( next_cooked() ) {
+    last if $silence_level==$level;
+  }
+
+  err("unmatched \$silence") if $level != $silence_level;
+
+  return "";
+};
+
+xmacro 'fprog', sub {
+  my $level=$fprog_level++;
+  my $v="";
+  my $r;
+  my ($fi,$fo);
+
+  #//prepare locals
+  push @saved_mac_spaces,{};
+
+  #//collect body;
+  while ( next_cooked() ) {
+    last if $fprog_level==$level;
+    $v .= $$sym_tv[1];
+  }
+  err("unmatched \$fprog") if $level != $fprog_level;
+  if ($v !~ /^\s*program/ms) {
+    $v = "
+      program emb_fpx3_prog
+      $v
+      end program emb_fpx3_prog
+";
+  }
+  #//removal of local macros
+  remove_locals();
+
+  ($fi,$fo)=gen_ftmp();
+  #print "fi=$fi\n";
+  #print "fo=$fo\n";
+  print FOR_HD $v;
+  close FOR_HD;
+  fcomp($fi,$fo);
+  $r=`$fo`;
+  chomp($r);
+  #print "r=[$r]\n";
+  err("$?: Cannot run embedded Fortran program ${fo}.") if $?;
+  rm_ftmp($fi,$fo);
+  return $r;
+};
+
+
+sub gen_attribute {
+  my $v;
+  if (@attribute_stack) {
+    $v=join(',',@attribute_stack);
+    $v =~ s/,,//g;
+    $fpx3_user::attribute_value=$v;
+  } else {
+    $fpx3_user::attribute_value=undef;
+  }
+}
+
+xmacro 'attribute', sub {
+  my $t;
+  match($space_t);
+  $t=val_of_restline();
+  $t =~ s/\s*$//;
+  push @attribute_stack,$t;
+  gen_attribute();
+  return "";
+};
+
+xmacro 'endattribute', sub {
+  err("unmatched endattribute") unless @attribute_stack;
+  pop @attribute_stack;
+  gen_attribute();
+  return "";
+};
+
+xmacro 'include', sub {
+  my @buf=();
+  my ($d,$af,$rf);
+  my $ds=$fpx3_io::dirsep;
+  my $ps=$fpx3_io::pathsep;
+  while ( $rf=next_val() ) {
+    $rf =~ s/\s*"(.*?)"\s*/$1/;
+    $rf =~ s/\s*'(.*?)'\s*/$1/;
+
+    for $d (split($ps, $include_path)) {
+      $d =~ s/~/$real_home/ if $real_home;
+      if ($ds eq "\\") {
+	if ( $rf =~ /\w:\\/ ) {
+	  $af=$rf;
+	} else {
+	  $af="$d\\$rf";
+	  $af =~ s/\\\\/\\/g;
+	}
+      } elsif ($ds eq "/") {
+	if ( $rf =~ /\//) {
+	  $af=$rf;
+	} else {
+	  $af="$d/$rf";
+	  $af =~ s/\/\//\//g;
+	}
+      } else {
+	$af =~ s/$ds$ds/$ds/g;
+	$af="$d$ds$rf";
+      }
+      last if -r $af;
+      $af=undef;
+    }
+    err("Cannot find $rf in ${include_path}.") unless $af;
+    push @buf,[ $af, "", 0, [] ];
+    $af =~  s/$real_home/~/ if $real_home;
+    if ($ds eq "\\") {
+      if ($real_cwd) {
+	my $pat=$real_cwd;
+	$pat =~ s/\\/\\\\/g;
+	$af =~  s/$pat\\//;
+      }
+    } else {
+      $af =~  s/$real_cwd$ds// if $real_cwd;
+    }
+    $include_dep{$af}=1;
+  }
+  err("empty include") unless @buf;
+  push_file_stack(reverse @buf);
+  return "";
+};
+
+xmacro 'str', sub {
+  match($space_t);
+  match($par1a_t) || err("'(' expected");
+  return "\'" . rest_in_bracket() . "\'";
+};
+
+xmacro 'comment',  sub {
+  match($space_t);
+  match($par1a_t) || err("'(' expected");
+  return "!" .  rest_in_bracket();
+};
+
+xmacro 'endblock', sub {
+  $block_level--;
+  return "";
+};
+
+xmacro 'endfprog', sub {
+  $fprog_level--;
+  return "";
+};
+
+xmacro 'endsilence', sub {
+  $silence_level--;
+  return "";
+};
+
+xmacro '$endsub', sub {
+  err("unmatched endsub");
+};
+
+xmacro 'endquote', sub {
+  err("unmatched endquote");
+};
+
+xmacro 'endperl', sub {
+  err("unmatched endperl");
+};
+
+xmacro 'undiscard', sub {
+  err("unmatched undiscard");
+};
+
+xmacro 'error', sub {
+  my @a=@_; @a=get_args() unless @a;
+  my $t=lc(join(' ',@a));
+
+  print STDERR "fpx3 user error at $fpx3_io::file_name, line $fpx3_io::line_num: $t\n";
+  exit(1);
+};
+
+xmacro 'warn', sub {
+  my @a=@_; @a=get_args() unless @a;
+  my $t=lc(join(' ',@a));
+
+  print STDERR "fpx3 user warning at $fpx3_io::file_name, line $fpx3_io::line_num: $t\n";
+  return "";
+};
+
+sub fkey {
+  my $key=$hostname . ":" . fcmd();
+  chomp($key);
+  1 while $key =~ s/\n/\\n/;
+  return $key;
+}
+
+sub f_ex_r {
+  my $kind=$_[0];
+
+  return <<EOF;
+      program fpx3_r_exercise
+      implicit none
+      integer,parameter::my_kind=$kind
+      real(my_kind),parameter::r=1.0_my_kind
+
+      print*,'r',my_kind,'_digits=',digits(r)
+      print*,'r',my_kind,'_epsilon=',epsilon(r)
+      print*,'r',my_kind,'_maxexponent=',maxexponent(r)
+      print*,'r',my_kind,'_minexponent=',minexponent(r)
+      print*,'r',my_kind,'_huge=',huge(r)
+      print*,'r',my_kind,'_radix=',radix(r)
+      print*,'r',my_kind,'_range=',range(r)
+      print*,'r',my_kind,'_tiny=',tiny(r)
+      print*,'finished exercise'
+      end program fpx3_r_exercise
+EOF
+}
+
+sub f_ex_i {
+  my $kind=$_[0];
+
+  return <<EOF;
+      program fpx3_i_exercise
+      implicit none
+      integer,parameter::my_kind=$kind
+      integer(my_kind),parameter::i=1_my_kind
+
+      print*,'i',my_kind,'_radix=',radix(i)
+      print*,'i',my_kind,'_huge=',huge(i)
+      print*,'i',my_kind,'_bit_size=',bit_size(i)
+      print*,'i',my_kind,'_digits=',digits(i)
+      print*,'i',my_kind,'_range=',range(i)
+      print*,'finished exercise'
+      end program fpx3_i_exercise
+EOF
+
+}
+
+sub f_ex_0 {
+
+  return <<EOF;
+      program fpx3_exercise0
+      implicit none
+      integer::my_exp_range,my_precision,my_kind
+      integer,parameter::max_kind_num=64
+      logical::known_kind(0:max_kind_num)
+
+      logical::L
+      integer::i
+      real::r
+      double precision::dp
+      complex::z
+
+! default kinds
+      print*,'l_kind=',kind(L)
+      print*,'i_kind=',kind(i)
+      print*,'r_kind=',kind(r)
+      print*,'z_kind=',kind(z)
+      print*,'dp_kind=',kind(dp)
+
+! details of default int
+      print*,'i_radix=',radix(i)
+      print*,'i_huge=',huge(i)
+      print*,'i_bit_size=',bit_size(i)
+      print*,'i_digits=',digits(i)
+      print*,'i_range=',range(i)
+
+! details of default real
+      print*,'r_digits=',digits(r)
+      print*,'r_epsilon=',epsilon(r)
+      print*,'r_maxexponent=',maxexponent(r)
+      print*,'r_minexponent=',minexponent(r)
+      print*,'r_huge=',huge(r)
+      print*,'r_radix=',radix(r)
+      print*,'r_range=',range(r)
+      print*,'r_tiny=',tiny(r)
+
+! details of default double precision
+      print*,'dp_digits=',digits(dp)
+      print*,'dp_epsilon=',epsilon(dp)
+      print*,'dp_maxexponent=',maxexponent(dp)
+      print*,'dp_minexponent=',minexponent(dp)
+      print*,'dp_huge=',huge(dp)
+      print*,'dp_radix=',radix(dp)
+      print*,'dp_range=',range(dp)
+      print*,'dp_tiny=',tiny(dp)
+
+! all integer kinds
+      known_kind(0:max_kind_num)=.false.
+      my_exp_range=1
+      do
+        my_kind=selected_int_kind(my_exp_range)
+        if ( my_kind < 0 ) exit
+        if (.not. known_kind(my_kind) ) then
+          known_kind(my_kind)=.true.
+          print*,'have_i',my_kind,'=.true.'
+        endif
+        my_exp_range=my_exp_range+1
+      enddo
+
+! all real kinds
+      known_kind(0:max_kind_num)=.false.
+      my_exp_range=1
+      do
+
+        my_precision=1
+        do
+          my_kind=selected_real_kind(my_precision,my_exp_range)
+          if ( my_kind < 0 ) exit
+          if (.not. known_kind(my_kind) ) then
+            known_kind(my_kind)=.true.
+            print*,'have_r',my_kind,'=.true.'
+          endif
+
+          my_precision=my_precision+1
+        enddo
+
+        if ( my_kind < -1 ) exit
+        my_exp_range=my_exp_range+1
+      enddo
+
+      print*,'finished exercise'
+
+      end program fpx3_exercise0
+EOF
+}
+
+
+sub on_f_ex_error {
+  fpx3_io::msg("found problem with exercise");
+  $f_ex_err=1;
+}
+
+sub f_exercise {
+  my $prog=$_[0];
+  my ($fi,$fo)=gen_ftmp();
+  my @result;
+  my $line;
+  my $finished;
+
+  $f_ex_err=0;
+
+  print FOR_HD $prog;
+  close FOR_HD;
+  fcomp($fi,$fo, \&on_f_ex_error );
+  if ($f_ex_err) {
+    rm_ftmp($fi);
+    return;
+  }
+  @result=`$fo`;
+  $finished=0;
+  foreach $line (@result) {
+    chomp($line);
+    1 while $line =~ s/\s+//;
+    $f_ex{$1}=$2 if $line =~ /(.*?)=(.*)/;
+    $finished=1 if $line =~ /finished/;
+  }
+  rm_ftmp($fi,$fo);
+  if (!$finished) {
+    print STDERR "fpx3: Cannot exercise Fortran environment.\n";
+    exit(1);
+  }
+
+
+}
+
+sub insert_f_ex {
+  my $k;
+  for $k (keys %f_ex) {
+    if ($k !~ /^have_/ ) {
+      xmacro $k, $f_ex{$k} if defined $f_ex{$k};
+    }
+  }
+}
+
+sub remove_f_ex {
+  my $k;
+  for $k (keys %f_ex) {
+    if ($k !~ /^have_/ ) {
+      #print "undefine $k\n";
+      ${"fpx3_user\::$k"}=undef;
+    }
+  }
+}
+
+sub exercise  {
+  my ($k,$v,$fkey);
+  my $cache;
+  my $line;
+  my $done=0;
+  my ($fi,$fo);
+  my (@i_list,@r_list);
+  $fkey=fkey();
+  return if $fkey eq $used_fkey;
+
+  remove_f_ex();
+  %f_ex=();
+
+  if ($fkey =~ /^(\w+)/ ) {
+    $cache="$1_";
+  } else {
+    $cache="gen_";
+  }
+
+  $cache .= "fpx3_exercise_cache.tmp";
+
+  if (-r $cache) {
+    open(CACHE,"< $cache");
+    $k=<CACHE>;
+    chomp($k);
+    if ( $k eq $fkey) {
+      while ($line=<CACHE>) {
+	chomp($line);
+	$f_ex{$1}=$2 if $line =~ /(.*?)=(.*)/;
+      }
+      close CACHE;
+      insert_f_ex();
+      $used_fkey=$fkey;
+      return;
+    } else {
+      close CACHE;
+    }
+  }
+
+  fpx3_io::msg("Exercise Fortran environment:\"$fkey\"");
+  fpx3_io::msg("Exercise available kinds");
+
+  f_exercise(f_ex_0());
+  if ($f_ex_err) {
+      print STDERR "Cannot exercise Fortran environment.\n";
+      exit(1);
+  }
+
+  @i_list=();
+  @r_list=();
+  foreach $k (sort keys %f_ex) {
+    if ($k =~ /^have_i(\d+)/ ) {
+      fpx3_io::msg("exercise integer($1)");
+      push @i_list,$1;
+      f_exercise(f_ex_i($1));
+      if ($f_ex_err) {
+	fpx3_io::msg("remove integer kind $1");
+	delete $f_ex{$k};
+      }
+    } elsif ($k =~ /^have_r(\d+)/ ) {
+      push @r_list,$1;
+      fpx3_io::msg("exercise real($1)");
+      f_exercise(f_ex_r($1));
+      if ($f_ex_err) {
+	fpx3_io::msg("remove real kind $1");
+	delete $f_ex{$k};
+      }
+    }
+  }
+
+  $f_ex{i_kind_list}=join(",",sort {$a <=> $b} @i_list);
+  $f_ex{r_kind_list}=join(",",sort {$a <=> $b} @r_list);
+  open(CACHE,"> $cache");
+  print CACHE "$fkey\n";
+  for $k ( sort keys %f_ex ) {
+    print CACHE "$k=$f_ex{$k}\n";
+  }
+  close CACHE;
+
+  insert_f_ex();
+  $used_fkey=$fkey;
+  return
+}
+
+sub f_inquire_fun {
+  my $fun=shift;
+  my @a=@_; @a=get_args() unless @a;
+
+  my $t=lc(join(' ',@a));
+  my $cmd=fcmd();
+  my $fkey=fkey();
+  my $r;
+
+  exercise() unless $used_fkey eq $fkey;
+  1 while $t =~ s/\s+//g;
+  $r=$f_ex{"$fun($t)"};
+  return undef unless $r;
+  #err("cannot detect $fun($t)") unless $r;
+  return $r;
+}
+
+
+
+
+#//========================================================================
+#//FPX3_USER:user macros
+package fpx3_user;
+use Cwd;
+use fpx3_io qw( file_name line_num );
+use fpx3_ml qw( fixed_form );
+use fpx3_mp qw( get_args );
+use fpx3_mac;
+use fpx3_std qw( sub_arg );
+
+BEGIN {
+  $INC{'fpx3_user.pm'}=1;
+  sub macro (@) {
+    tie $_[0], 'fpx3_mac', @_[1..$#_];
+  }
+
+  sub xmacro (@) {
+    my $m=shift;
+    my $a=$_[0];
+    #print STDERR "user xmacro: \$m=$m, \$a=$a, \@_=@_\n";
+    $$m=$a if ref($a) eq "CODE";
+    tie $$m, 'fpx3_mac', @_;
+  }
+
+}
+
+
+#//========================================================================
+#//FPX3_FL:lexer for our small Fortran subset
+package fpx3_fl;
+use fpx3_io qw( err );
+use fpx3_ml ( @fpx3_ml::symbols , qw( symbols sym_doc sym_tv fixed_form ) );
+
+BEGIN {
+  $INC{'fpx3_fl.pm'}=1;
+  @dis_buf=();
+
+  $dispel_trigger[$any_t]= \&dispel_any;
+  $dispel_trigger[$stack_t]= \&dispel_stack;
+  $dispel_trigger[$void_t]= \&dispel_void;
+
+  $glue_trigger[$and_t]= \&glue_and;
+  $glue_trigger[$eol_t]= \&glue_eol;
+  $glue_trigger[$colon_t]= \&glue_colon;
+  $glue_trigger[$numeric_t]= \&glue_numeric;
+  $glue_trigger[$q1_t]= \&glue_q1;
+  $glue_trigger[$q2_t]= \&glue_q2;
+  $glue_trigger[$word_t]= \&glue_word;
+  $glue_trigger[$space_t]= \&glue_space;
+
+}
+
+
+sub dispel_void {
+  return undef;
+}
+
+sub dispel_stack {
+  push @dis_buf,@$$sym_tv[1];
+  return undef;
+}
+
+sub dispel_any {
+  my @buf;
+  local $_=$$sym_tv[1];
+  push @buf,$sym_tv while $sym_tv=fpx3_ml::std_scan();
+  push @dis_buf, reverse @buf;
+  return undef;
+}
+
+sub glue_q {
+  my $q=shift;
+  my $v=$$sym_tv[1];
+  my $level=1;
+  while ( dispel() ) {
+    $v .= $$sym_tv[1];
+    if ( $$sym_tv[0]==$q ) {
+      dispel();
+      if ($$sym_tv[0] != $q) {
+	push @dis_buf,$sym_tv;
+	$level=0;
+	last;
+      }
+      $v .= $$sym_tv[1];
+      next;
+    }
+  }
+  err("glue_q: Cannot find end of string.") if $level;
+  $sym_tv=[$string_t,$v];
+  return $string_t;
+}
+
+sub glue_q1 {
+  glue_q($q1_t);
+}
+
+sub glue_q2 {
+  glue_q($q2_t);
+}
+
+sub glue_word {
+  my $tv=[];
+  @$tv=@$sym_tv;
+  while ( dispel() ) {
+    if ($$sym_tv[0] == $word_t || $$sym_tv[0] == $numeric_t) {
+      $$tv[1] .= $$sym_tv[1];
+      next;
+    }
+    push @dis_buf,$sym_tv;
+    last;
+  }
+  #print "glue_work:@$tv\n";
+  $sym_tv=$tv;
+  return $$sym_tv[0];
+}
+
+
+sub glue_space {
+  my $tv=[];
+  @$tv=@$sym_tv;
+  while ( dispel() ) {
+    if ($$sym_tv[0] == $space_t ) {
+      $$tv[1] .= $$sym_tv[1];
+      next;
+    }
+    push @dis_buf,$sym_tv;
+    last;
+  }
+  $sym_tv=$tv;
+  return $$sym_tv[0];
+}
+
+
+sub glue_numeric {
+  my $tv=[];
+  @$tv=@$sym_tv;
+  while ( dispel() ) {
+    if ($$sym_tv[0] == $numeric_t) {
+      $$tv[1] .= $$sym_tv[1];
+      next;
+    }
+    push @dis_buf,$sym_tv;
+    last;
+  }
+  #print "glue_numeric:@$tv\n";
+  $sym_tv=$tv;
+  return $$sym_tv[0];
+}
+
+
+sub glue_colon {
+  my $tv=$sym_tv;
+  if ( dispel() == $colon_t) {
+    if (defined $fpx3_user::attribute_value) {
+      $sym_tv=[$other_t, ',' . $fpx3_user::attribute_value . '::'];
+    } else {
+      $sym_tv=[$other_t,'::'];
+    }
+    return $$sym_tv[0];
+  }
+
+  push @dis_buf,$sym_tv;
+  $sym_tv=$tv;
+  return $$sym_tv[0];
+}
+
+
+sub glue_eol {
+  return $$sym_tv[0] unless defined $fixed_form;
+  my @buf=();
+  my $s="";
+  my $p;
+  $p=$sym_tv;
+
+ X:{
+    #//space
+    while (dispel()==$space_t) {
+      $s .= $$sym_tv[1];
+      push @buf,$sym_tv;
+    }
+    push @buf,$sym_tv;
+    last X if ( length($s) != 5 || $$sym_tv[0] == $eol_t);
+    if ( $$sym_tv[1] =~ /^(.)(.*)/ ) {
+      $s .= $1;
+      push @dis_buf,[$any_t,$2] if $2;
+    } else {
+      err("\$glue_trigger[\$eol_t]:internal error");
+    }
+    $sym_tv=[$f_break_t, $$p[1] . $s ];
+    return $$sym_tv[0];
+  }
+
+  push @dis_buf,reverse @buf;
+  $sym_tv=$p;
+  return $$sym_tv[0];
+}
+
+sub glue_and {
+  return $$sym_tv[0] if defined $fixed_form;
+  my @buf=();
+  my $s="";
+  my $tv=$sym_tv;
+
+ X:{
+    #//space
+    push @buf,$sym_tv while dispel()==$space_t;
+    #//eol
+    push @buf,$sym_tv;
+    last X if $$sym_tv[0] != $eol_t;
+    #//space
+    push @buf,$sym_tv while dispel()==$space_t;
+    #//&
+    push @buf,$sym_tv;
+    last X if $$sym_tv[0] != $and_t;
+
+    $s=$$tv[1];
+    for $tv (@buf) {
+      $s .= $$tv[1];
+    }
+
+    $sym_tv=[$f_break_t, $s ];
+    return $$sym_tv[0];
+  }
+
+  push @dis_buf,reverse @buf;
+  $sym_tv=$tv;
+  return $$sym_tv[0];
+}
+
+
+sub dispel {
+  my $trig;
+
+  while (1) {
+
+    if (@dis_buf) {
+      $sym_tv=pop @dis_buf;
+    } else {
+      fpx3_mp::next_cooked() || return 0;
+    }
+
+    if ( defined ($trig = $dispel_trigger[$$sym_tv[0]]) ) {
+      &$trig() || next;
+    }
+
+    return $$sym_tv[0];
+  }
+}
+
+
+sub glue {
+  my $trig;
+  dispel();
+  &$trig() if ( defined ($trig = $glue_trigger[$$sym_tv[0]]) );
+  return $$sym_tv[0];
+}
+
+sub next_sym {
+  glue();
+  return $$sym_tv[0];
+}
+
+#//========================================================================
+#//FPX3_FP:parser for thin Fortran surface
+package fpx3_fp;
+use fpx3_io qw( err );
+use fpx3_ml qw( fixed_form );
+use fpx3_fl ( @fpx3_fl::symbols, qw( sym_doc next_sym sym_tv ) );
+
+BEGIN {
+  $INC{'fpx3_fp.pm'}=1;
+
+  %have_module=();
+  $unit=['']; #//name,sub-units
+  $actual_unit_id="";
+  #//insert one \n to simplify start of line detection;
+  #//this also asserts $match_pos>0
+  @match_buf=([$eol_t,"\n"]);
+  $match_pos=$#match_buf+1; #//pos of next item in match_buf;
+}
+
+sub match_any {
+  if ($match_pos > $#match_buf) {
+    next_sym();
+    push @match_buf,$sym_tv;
+    $match_pos++;
+    return $$sym_tv[0];
+  }
+
+  $sym_tv=$match_buf[$match_pos];
+  $match_pos++;
+  return $$sym_tv[0];
+}
+
+sub match { #//skipping leading spaces
+
+ LOOP: while (1) {
+
+    if ($match_pos > $#match_buf) {
+      while ( next_sym() == $space_t ) {
+	push @match_buf,$sym_tv;
+	$match_pos++;
+      }
+      push @match_buf,$sym_tv;
+      return undef if (@_ && $_[0] != $$sym_tv[0] );
+      $match_pos++;
+      return $$sym_tv[0];
+    }
+
+    if ( $match_buf[$match_pos][0] == $space_t) {
+      $match_pos++;
+      next LOOP;
+    }
+
+    return undef if (@_ && $_[0] != $match_buf[$match_pos][0] );
+    $sym_tv=$match_buf[$match_pos];
+    $match_pos++;
+    return $$sym_tv[0];
+  }
+}
+
+sub unmatch {
+  $match_pos=$_[0];
+  $sym_tv=[undef,undef];
+  return undef;
+}
+
+
+sub result { #// concats values from $_[0] to $_[1]-1 || $match_pos-1
+  my $tv;
+  my $v="";
+  my ($p1,$p2)=@_;
+  $p2=$match_pos unless defined $p2;
+
+  err("internal error: bad range in sub result") if $p1>$p2;
+  foreach $tv (@match_buf[ $p1 .. $p2-1 ]) {
+    $v .= $$tv[1];
+  }
+  return $v;
+}
+
+
+sub mark {
+  my ($p1,$text)=@_;
+  print STDERR "$text:" . result($p1);
+}
+
+sub match_bracket_tail {
+  my $p=$match_pos;
+  while (match_any()) {
+    last if $$sym_tv[0]==$par1b_t;
+    match_bracket_tail() if $$sym_tv[0]==$par1a_t;
+  }
+  return $p;
+}
+
+sub match_label {
+  my $p=$match_pos;
+
+  $match_buf[$p-1][0] == $eol_t || return unmatch($p);
+  match($numeric_t) || return unmatch($p);
+  return $p;
+}
+
+
+sub seek_end_of_stmt {
+  my $p=$match_pos;
+  while ( match_any() ) {
+    return $p if ($$sym_tv[0] == $semico_t || $$sym_tv[0] == $eol_t);
+  }
+  return $p;
+}
+
+sub match_assign_stmt {
+  my $p=$match_pos;
+  my ($p1,$p2,$LHS);
+
+  match_label();
+  $p1=$match_pos;
+  match($word_t) || return unmatch($p);
+  match();
+  if ($$sym_tv[0]==$par1a_t) {
+    match_bracket_tail();
+    match();
+  }
+  return unmatch($p) unless $$sym_tv[0]==$assign_t;
+  $p2=$match_pos-1;
+
+  $LHS=result($p1,$p2);
+  $LHS =~ s/^\s*(.*\S)\s*$/$1/;
+  $fpx3_user::LHS=$LHS;
+  seek_end_of_stmt();
+  $fpx3_user::LHS=undef;
+  mark($p,"(assign_stmt:$LHS)") if $::debug;
+  return $p;
+}
+
+
+sub match_any_stmt {
+  my $p=$match_pos;
+
+  #//match_any() || return unmatch($p);
+  seek_end_of_stmt();
+  return unmatch($p) if ($match_pos <= $p+1 && ! $$sym_tv[0]);
+  mark($p,"(any_stmt)") if $::debug;
+  return $p;
+}
+
+
+sub match_stmt {
+  my $p=$match_pos;
+  return $p if match_assign_stmt();
+  return $p if seek_end_of_stmt();
+  return unmatch($p);
+}
+
+sub match_empty_stmt {
+  my $p=$match_pos;
+  match_label();
+  match($comment_t);
+  match($semico_t) || match($eol_t) || return unmatch($p);
+  mark($p,"(empty_stmt)") if $::debug;
+  return $p;
+}
+
+
+sub match_use_stmt {
+  my $p=$match_pos;
+  my $m;
+  match_label();
+  match($word_t) || return unmatch($p);
+  $$sym_tv[1] =~ /^use$/i || return unmatch($p);
+  match($word_t) || err("Cannot parse use statement.");
+  $m=$$sym_tv[1];
+  $module_dep{$m}=1;
+  {
+    package fpx3_user;
+    if (not $local_use{$m}) {
+      $local_use{$m}=scalar(keys %local_use)+1;
+    }
+  }
+  seek_end_of_stmt();
+  mark($p,"(use_stmt)") if $::debug;
+  return $p;
+}
+
+
+sub match_contains {
+  my $p=$match_pos;
+  match_label();
+  match($word_t) || return unmatch($p);
+  length($$sym_tv[1]) == 8 || return unmatch($p);
+  $$sym_tv[1] =~ /^contains$/i || return unmatch($p);
+  match($comment_t);
+  match($eol_t) || match($semico_t) || return unmatch($p);
+  mark($p,"(contains_stmt)") if $::debug;
+  return $p;
+}
+
+
+
+sub match_unit_start {
+  my $p=$match_pos;
+  my ($kind,$name);
+
+  match_label();
+
+  #//strip off prefix, get unit kind
+  while (match_any()) {
+
+    next if $$sym_tv[0] == $space_t;
+
+    if ( $$sym_tv[0] == $word_t ) {
+      if ($$sym_tv[1] =~ /^(program|module|subroutine|function)$/i) {
+	$kind=lc($1);
+	last;
+      }
+      next;
+    }
+
+    if ( $$sym_tv[0] == $par1a_t ) {
+      match_bracket_tail();
+      next;
+    }
+
+    return unmatch($p);
+  }
+
+
+  #//name:
+  match($word_t) || return unmatch($p);
+  $name=$$sym_tv[1];
+  if ($kind eq "module" ) {
+    return unmatch($p) if $name =~ /^procedure$/i;
+    $fpx3_user::this_module=$name;
+    $have_module{$name}=1;
+  }
+  push @fpx3_std::context,$name;
+  $actual_unit_id=lc($kind) . " " . lc($name);
+  seek_end_of_stmt();
+  mark($p,"(unit_start)") if $::debug;
+  return $p;
+}
+
+
+sub match_unit_end {
+  my $p=$match_pos;
+  my $kind;
+  match_label();
+
+  match($word_t) || return unmatch($p);
+  $$sym_tv[1] =~ /^end/icg || return unmatch($p);
+  if ( $$sym_tv[1] =~ /\G(program|module|subroutine|function)$/icg) {
+    $kind=lc($1);
+  }else {
+    match($word_t) || return unmatch($p);
+    $$sym_tv[1] =~ /^(program|module|subroutine|function)$/i || return unmatch($p);
+    $kind=lc($1);
+  }
+
+  match($word_t);
+  match($comment_t);
+  match($eol_t) || match($semico_t) || return unmatch($p);
+  pop @fpx3_std::context;
+  $fpx3_user::this_module="" if $kind eq "module";
+  mark($p,"(unit_end)") if $::debug;
+  return $p;
+
+}
+
+sub match_unit {
+  my $p=$match_pos;
+  my ($kind,$name);
+
+ X:{
+
+    match_unit_start() || return unmatch($p);
+    my $env_unit=$unit;
+    local $unit=[$actual_unit_id];
+    push @$env_unit,$unit;
+
+    #//uses:
+    while (1) {
+      next if match_use_stmt();
+      next if match_empty_stmt();
+      last;
+    }
+
+    #//simple statements until contains_stmt
+    while (1) {
+      last if match_contains();
+      last X if match_unit_end();
+      next if match_assign_stmt();
+      next if match_any_stmt();
+      last X;
+    }
+
+    #// internal subs/funs are treated like units
+    while (1) {
+      last X if match_unit_end();
+      next if match_unit();
+      next if match_empty_stmt();
+      last X;
+    }
+
+  }
+
+
+  return $p;
+}
+
+
+sub match_all {
+  my $p=$match_pos;
+  while (1) {
+    next if  match_unit();
+    next if  match_assign_stmt();
+    next if  match_any_stmt();
+    last;
+  }
+  return $p;
+}
+
+
+
+#//========================================================================
+#//FPX3_TRANS: final translation
+package fpx3_trans;
+use fpx3_io qw( open_named_file line_control file_name line_num);
+use fpx3_ml qw( fixed_form );
+use fpx3_fp qw( match_all result );
+use fpx3_std qw( max_line_length );
+
+
+BEGIN {
+  $INC{'fpx3_trans.pm'}=1;
+  $logic_line_num=0;
+  $logic_file_name="";
+  $long_line=0;
+}
+
+sub translate_file {
+  my $f=shift;
+  my $p;
+  open_named_file($f);
+  $p=match_all();
+  return result($p);
+}
+
+sub lc_print {
+  my $line;
+  my ($f,$n,$t);
+
+
+  if ($line_control) {
+    $line=$_[0];
+    $logic_line_num++;
+    #print "line=$line";
+    #if ($line !~ /&/) {
+      if ( $line =~ s/!#_lc(\d+)\s*(.*)\n// ) {
+	$line .= "\n";
+	if (not $long_line) {
+	  $n=$1;
+	  $f=$2;
+	  $t="";
+	  if ( $line !~ /^\s*$/ ) {
+	    #if ( $logic_file_name ne $file_name || $logic_line_num  != $n  ) {
+	    if (  $logic_file_name ne $f  || $logic_line_num  != $n  ) {
+	      $logic_line_num=$n;
+	      $t="$logic_line_num";
+	      if ( $logic_file_name  ne $f  ) {
+		$logic_file_name=$f;
+		$t .=" \"$logic_file_name\"";
+	      }
+	    }
+	    #print("#line $logic_line_num $logic_file_name\n");
+	    #print STDERR "[$fpx3_user::FC]\n";
+	    if (defined($fpx3_user::FC) && $fpx3_user::FC =~ /xlf/) {
+	      print("#line $t\n") if $t;
+	    } else {
+	      print("# $t\n") if $t;
+	    }
+	  }
+	}
+      }
+    #}
+    print($line);
+  } else {
+    print(@_);
+  }
+
+}
+
+sub f_print_long_line {
+  my $s=shift;
+  my $q="";
+  my $v="";
+  my $x="";
+  my $qphase=0;
+  my $want_break=0;
+  my ($break_end,$break_start,$vmax);
+
+  if ( length($s) <= $max_line_length ) {
+    lc_print($s);
+    return;
+  }
+
+  $long_line=1;
+
+  if ( defined $fixed_form ) {
+    if ($s =~ /^[cCdD!*]/ ) {
+      lc_print($s); #//do not break comments
+      return;
+    }
+    $break_end="\n";
+    $break_start="     & ";
+  } else {
+    $break_end=" &\n";
+    $break_start=" & ";
+  }
+
+  $vmax=$max_line_length-length($break_end)-2;
+  while (1) {
+
+    if ( length($v)+length($x) <= $vmax && !$want_break )  {
+      $v .= $x;
+    } else {
+      if ($v =~ /^[ \t]*$/ ) { #//discard empty line
+	$v=$x;
+      } elsif ( $qphase == 0 ) {
+	if ($q) {
+	  lc_print("$v$q$break_end");
+	  $v ="$break_start// $q$x";
+	} else {
+	  lc_print("$v$break_end");
+	  $v="$break_start$x";
+	}
+      } elsif ( $qphase == 1 ) {
+	lc_print("$v$break_end");
+	$v="$break_start$x";
+      } else {
+	$v .= $x;
+      }
+      $want_break=0;
+    }
+    $x="";
+    $qphase=0;
+
+    $q && $s =~ /\G(''|"")/gc && do {
+      $x=$1;
+      next;
+    };
+
+    $s =~ /\G('|")/gc && do { #'
+      $x = $1;
+      next if ($q && $q ne $x);
+      #//do not start string near eol
+      $want_break=1 if ( !$q && length($v)>$vmax-4);
+
+      if ($q) {
+	$qphase=2;
+	$q="";
+      } else {
+	$q=$1;
+	$qphase=1;
+      }
+      next;
+    };
+
+    if (!$q ) {
+
+      #//do not break words outside strings
+      $s =~ /\G([_a-zA-Z]\w+)/gc && do {
+	$x=$1;
+	next;
+      };
+
+      #//do not break narrow numbers
+      $s =~ /\G(\d?\.[dDeE][+-]?\d+|\d+)/gc && do {
+	$x=$1;
+	next;
+      };
+
+      #//do not break comments
+      $s =~ /\G(!.*)/gc && do {
+	$v .= $1;
+	last;
+      };
+
+    }
+
+    $s =~ /\G(.)/gc && do {
+      $x=$1;
+      next;
+    };
+
+    last;
+  }
+
+  lc_print("$v\n") if $v;
+
+  $long_line=0;
+
+}
+
+
+sub f_print_block {
+  while (1) {
+
+    $_[0] =~ /\G\s*\n/gc && do {
+      lc_print("\n");
+      next;
+    };
+
+     $_[0] =~ /\G([^\n]*\n)/gc && do {
+       if (length($1)<=$max_line_length) {
+	 lc_print($1);
+	 next;
+       }
+       f_print_long_line($1);
+       next;
+     };
+
+    $_[0] =~ /\G([^\n]+)/gc && do {
+       if (length($1)<=$max_line_length) {
+	 lc_print($1);
+	 next;
+       }
+       f_print_long_line($1);
+       next;
+     };
+
+    last;
+  }
+
+}
+
+
+#//========================================================================
+#// FPX3_MAIN
+package main;
+use fpx3_io qw( line_control );
+use fpx3_ml qw( fixed_form ignore_quotes );
+use fpx3_trans qw( f_print_block translate_file lc_print);
+use fpx3_std qw( include_dep include_path real_cwd);
+use fpx3_fp qw(  have_module module_dep unit  );
+
+sub BEGIN {
+  $show_unit_n=0;
+}
+
+sub show_unit {
+  my $ref=shift;
+  my $prefix="!" . "  " x $show_unit_n;
+  my $x;
+
+  $show_unit_n++;
+  for $x (@$ref) {
+    if (ref($x)) {
+      show_unit($x);
+    } else {
+      lc_print("$prefix$x\n") if $x;
+    }
+  }
+  $show_unit_n--;
+}
+
+
+sub err {
+  my @con=caller(1);
+  my ($x,$c);
+  print STDERR "fpx3 error: @_\n";
+  $c="";
+  for $x (@con){
+    $c .= "$x "if defined $x;
+  }
+  print STDERR "context:$c\n";
+  exit(1);
+}
+
+sub usage {
+  print STDERR "Usage: fpx3 [-d] [-D<name>[=<value>]] [-free | -fixed] [-[no]dh]\n";
+  print STDERR "            [-[no]fo] [-[no]sh] [-h] [-i <initfile>] [-I<path>]\n";
+  print STDERR "            [-lc] [-o <ofile>] [-v] [<file list>] \n";
+}
+
+sub scan_argv {
+
+  A: foreach (@ARGV) {
+      
+      if ($_ eq "-o" ){
+	  $proc_opt_o=1;
+	  next;
+      }
+      
+      if ($proc_opt_o) {
+	  if ( /^\-/ )  {
+	      usage();
+	      exit 1;
+	  }
+	  $opt_o=$_;
+	  $proc_opt_o=0;
+	  next;
+      }
+
+      if ($_ eq "-i" ){
+	  $proc_opt_i=1;
+	  next;
+      }
+
+      if ($proc_opt_i) {
+	  if ( /^\-/ )  {
+	      usage();
+	      exit 1;
+	  }
+	  $opt_i=$_;
+	  $proc_opt_i=0;
+	  next;
+      }
+
+
+      if ($_ eq "-h" || $_ eq "-?" ){
+	  usage();
+	  exit 0;
+      }
+      
+      if ($_ eq "-v"){
+	  print "fpx3 version $version (on $^O with perl $])\n";
+	  exit 0;
+      }
+
+      if ($_ eq "-free"){
+	  $fixed_form=undef;
+	  $max_line_length=132;
+	  next A;
+      }
+
+      if ( $_ eq "-fixed") {
+	  $fixed_form=1;
+	  $max_line_length=72;
+	  next A;
+      }
+
+      if ( $_ eq "-d") {
+	  $debug=1;
+	  next A;
+      }
+
+      if ( $_ eq "-lc") {
+	  $line_control=1;
+	  next A;
+      }
+
+      if ( $_ eq "-iq") {
+	  $ignore_quotes=1;
+	  &fpx3_ml::ignore_quotes();
+	  next A;
+      }
+
+
+      if ( /^\-D(\w+)=(.+)$/ )  {
+	  package fpx3_user;
+	  $$1=$2;
+	  next A;
+      };
+
+      if ( /^\-D(\w+)$/ )  {
+	  package fpx3_user;
+	  $$1=1;
+	  next A;
+      };
+
+
+      #switch for dependency header: new or old form
+      if ( /^\-(no)?dh$/ or /^\-(!?)gd$/ )  {
+	  if ($1) {
+	      undef $opt_dh;
+	  } else {
+	      $opt_dh=1;
+	  }
+	  next A;
+      };
+      
+      #switch for Fortran output: new or old form
+      if ( /^\-(no)?fo$/ or /^\-(!?)gf$/ )  {
+	  if ($1) {
+	      undef $opt_fo;
+	  } else {
+	      $opt_fo=1;
+	  }
+	  next A;
+      };
+
+      #switch for structure header: new or old form
+      if ( /^\-(no)?sh$/ or /^\-(!?)gs$/ )  {
+	  if ($1) {
+	      undef $opt_sh;
+	  } else {
+	      $opt_sh=1;
+	  }
+	  next A;
+      };
+
+      if ( /^\-I(.*)/ )  {
+	  if ($1) {
+	      $include_path=$1;
+	  } else {
+	      err("fpx3-error: -I option with empty include path");
+	      $opt_sh=1;
+	  }
+	  next A;
+      };
+
+
+      if (/^\-./) {
+	  usage();
+	  err("fpx3-error: unknown flag: $_");
+	  exit(1);
+      }
+      push @top_files,$_;
+  }
+
+}
+
+sub read_init_file {
+    my $f=$opt_i;
+    package fpx3_user;
+
+    if ($f) {
+	die "Cannot read file ${f}." unless -r $f;
+	do $f;
+    } else {
+	my $init_file;
+	my $init_file2;
+	my $h;
+	my $ds=$fpx3_io::dirsep;
+	if ($fpx3_io::windows) {
+	    $h=$ENV{HOMEDRIVE} . $ENV{HOMEPATH};
+	    #// $init_file="fpx3.ini";
+	    #// $init_file2="$h\\fpx3.ini";
+	    $init_file=".fpx3";
+	    $init_file2="$h\\.fpx3";
+	} else {
+	    $h=$ENV{HOME};
+	    $init_file=".fpx3";
+	    $init_file2="$h$ds.fpx3";
+	}
+	if ( -r $init_file ) {
+	    do $init_file;
+	} elsif ( -r $init_file2 ) {
+	    do $init_file2;
+	}
+    }
+}
+
+sub maybe_gen_header {
+
+    if (defined $opt_dh || $opt_sh ) {
+	$fpx3_header=1;
+	lc_print("!fpx3_header($version)\n");
+	lc_print("!\n");
+    }
+
+    if (defined $opt_dh) {
+
+	@module_dep=();
+	for (keys %module_dep) {
+	    if (! $have_module{$_}) {
+		push @module_dep,$_;
+	    }
+	}
+
+	lc_print("!dependencies\n");
+	lc_print("!   dir: $real_cwd \n");
+	lc_print("!   sources: " . join(" ",@top_files) . "\n");
+	lc_print("!   includes: " . join(" ",keys %include_dep) . "\n");
+	lc_print("!   uses: " . join(" ",@module_dep) . "\n");
+	lc_print("!   provides: " . join(" ",keys %have_module) . "\n");
+	lc_print("!end dependencies\n");
+	lc_print("!\n");
+    }
+
+    if (defined $opt_sh) {
+	lc_print("!structure\n");
+	show_unit($unit);
+	lc_print("!end structure\n");
+	lc_print("!\n");
+    }
+
+    if ($fpx3_header) {
+	lc_print("!end fpx3_header\n");
+    }
+}
+
+
+
+#$rcs = ' $Id: fpx3,v 1.10 2006/02/03 16:00:04 jbehren Exp jbehren $ ' ;
+#$patch_level="";
+#if ( $rcs=~ /fpx3,v\s(\d*\.?\d*)\s/ ) {
+#  $version=0.1*$1;
+#  $version .= "_$patch_level" if $patch_level;
+#} else {
+#  $version="unknown";
+#}
+
+$version="0.20"; # RCS versions are not ordered numbers
+
+#//defaults
+$opt_dh=1;
+$opt_fo=1;
+$opt_sh=undef;
+$opt_o=undef;
+$opt_i=undef;
+@top_files=();
+$debug=0;
+$line_control=0;
+$ignore_quotes=0;
+#//scan arguments:
+$proc_opt_o=undef;
+$proc_opt_i=undef;
+
+scan_argv();
+
+if ( $opt_o) {
+  open(STDOUT, "> $opt_o") || die "Can't redirect stdout";
+}
+
+push @top_files,"-" unless @top_files;
+
+read_init_file();
+
+$result="";
+for $f ( @top_files ) {
+  $result .= translate_file($f);
+}
+
+maybe_gen_header();
+
+
+f_print_block($result) if $opt_fo;
+
+
+exit(0);
+
+__END__
+
+=head1 Fpx3 - Fortran Preprocessor with embedded Perl
+
+The purpose of fpx3 is to simplify Fortran source code development with
+an integrated set of macros, directives and embedded Perl/Fortran.
+Most common tasks can be done without Perl background using the documented
+examples. For sophisticated source code transformations Perls broad functionality
+can be used. Embedded Fortran can be used for general data initialization.
+There is support for Fortran context sensitive macros and local name spaces.
+Structural and dependency information for subsequent tools can be generated.
+
+
+Fpx3 is probably most useful for large projects with nontrivial hardware and
+software dependencies.
+It is written in pure Perl and should run on many platforms (tested
+on AIX, Linux, Tru64 UNIX, Windows NT).
+
+The latest version should be available at http://www.gwdg.de/~jbehren/fpx3 .
+
+=head1 Usage:
+
+fpx3 [B<-d>] [B<-D>I<name>[=I<value>]] [B<-free> | B<-fixed>] [B<-[no]dh>]
+        [B<-[no]fo>] [B<-[no]sh>] [B<-h>] [B<-i> I<initfile>] [B<-I>I<path>]
+        [B<-lc>] [B<-o> I<ofile>] [B<-v>] [I<file list>]
+
+
+=head1 Options:
+
+=over 4
+
+=item -d
+
+Print debug information on stderr.
+
+=item -DI<name>[=I<value>]
+
+Defines $I<name> with I<value> if specified, else with 1.
+
+=item -free | -fixed
+
+Assumes source code is in free (default) or fixed form.
+
+=item -[no]dh or -[!]gd
+
+Generate dependency header (default).
+
+=item -[no]fo or -[!]gf
+
+Generate Fortran output (default).
+
+=item -no[sh] or -[!]gs
+
+Generate structure header.
+
+=item -lc
+
+Insert cpp-like line control information for the Fortran compiler,
+the style depends on the the value of $FC.
+
+=item -i I<initfile>
+
+Read the initialization file I<initfile> and interpret it as Perl code.
+Default is the file B<.fpx3>
+in the current directory, if present. Otherwise the file B<~/.fpx3> is tried.
+An example initialization file is distributed with this program.
+
+=item -I I<path>
+
+Use I<path> when searching for include files via $include.
+It is interpreted as sequence of colon (unix) or semicolon
+(windows) separated directories.
+Can be accessed as $include_path.
+
+=item -o I<ofile>
+
+Write output to the file I<ofile> instead of stdout.
+
+=item -v
+
+Show version and exit.
+
+=item I<file list>
+
+The special filename '-' means reading from stdin. Stdin is also
+used when the file list is empty.
+
+=back
+
+=head1 Description:
+
+All fpx3 macros start with the B<$> character. This gives a non-ambiguous name space
+and makes reading Fortran source code with embedded macros easy.
+Macros can hold multi line constants,
+Perl subroutines or fpx3 subroutines. They are not expanded inside
+Fortran comments or strings. Evaluation of an undefined macro causes an error.
+The result of a macro expansion is not expanded again but treated as Fortran code.
+Standard macros of the form C<$endfoo> can be written with spaces between
+C<$end> and C<foo>.
+
+This document is written with the following convention:
+
+EOL := end of line
+
+I<name> := alphanumeric string
+
+I<perl_exp> := any Perl expression
+
+I<perl_line> := single line Perl expression, excluding EOL
+
+I<text> := one or more lines
+
+I<line> := rest of line, excluding EOL
+
+Macros can be accessed as $I<name> or ${I<name>}, for simplicity the second
+form is not mentioned explicitly in the following definitions.
+
+=head2 Directives and Standard Macros
+
+=over 4
+
+=item $define($I<name>,I<text> [[,$I<name>,I<text>]...])  |  $define $I<name> I<line> EOL
+
+Expands the second argument and assigns it to $I<name>. E.g.:
+
+   $define $x 1
+   $define $y $x$x
+
+This assigns 1 to $x and 11 to $y.
+
+=item $undefine $I<name>
+
+Removes the definition of $I<name> in the current scope.
+See $block and $sub for local scopes.
+
+=item $eval I<perl_exp> $endeval  |  $eval(I<perl_exp>)  |  $eval: I<perl_line> EOL
+
+Evaluates the Perl expression in the user name space.
+Use the less fragile long form if fpx3 complains about unbalanced brackets.
+Example:
+
+   $define $pi 3.1415926535897932
+   $eval:sqrt(2)*sin($pi/4)
+
+expands to 1.
+
+Embedded Perl is fast since it is evaluated inside the already running
+interpreter without IO overhead.
+
+=item $perl I<perl_exp> $endperl  |  $perl(I<perl_exp>)   | $perl: I<perl_line> EOL
+
+Like $eval but without result unless a return statement is used. E.g.:
+
+   $perl: $x=1; $y=2
+
+is identical to
+
+   $eval: $x=1; $y=2; return ""
+
+and does the same as
+
+   $define $x 1
+   $define $y 2
+
+And
+
+   $perl: return "$x$y"
+
+is identical to
+
+   $eval: "$x$y"
+
+and does the same as
+
+   $x$y
+
+=item $if (I<perl_exp>) I<text>
+[[$elsif (I<perl_exp>) I<text>]...]
+[$else I<text>]
+$endif
+
+Selects and evaluates the appropriate branch.
+Enclosing brackets (...) are not required if EOL
+close is meant. Example:
+
+   $if $platform eq "IBM.RS6000"
+      $define $LOC  LOC
+   $else
+      $define $LOC %LOC
+   $endif
+
+
+=item $quote I<text> $endquote
+
+Evaluates to the quoted (raw) I<text>.
+
+=item $include I<filenames>
+
+Reads the files and evaluates them. Updates the dependency list.
+
+=item $local
+
+Like $define, but the scope is local to the $sub, $block or $fprog region.
+
+=item $define $I<name> $sub I<text> $endsub
+
+Defines a macro that can be called with arguments. The evaluation takes
+place when $I<name> is used. Arguments are available as $0,$1,$2,...
+with $0 set to the macro name. $* gives the comma separated argument list
+and $# evaluates to the highest argument index. $shift returns $0 and
+shifts the other arguments one index down.
+E.g.:
+
+ $define $pot32 $sub
+   $local $name $0$1
+   $local $type $1
+   $type function $name(a)
+     $type,intent(in)::a
+     $name=sqrt(a)**3
+   end function $name
+ $endsub
+
+
+$pot32(real) evaluates to
+
+   real function pot32real(a)
+     real,intent(in)::a
+     pot32real=sqrt(a)**3
+   end function pot32real
+
+=item $block I<text> $endblock
+
+Evaluates interior text. $local is supported. Example:
+
+   $define $const $block
+      $local $p DOUBLE PRECISION
+      $local $e .D0
+      $p::ZERO,ONE,TWO,THREE,FOUR,FIVE
+      PARAMETER (ZERO=0$e,ONE=1$e,TWO=2$e,THREE=3$e,FOUR=4$e,
+     *    FIVE=5$e)
+   $endblock
+
+$const evaluates to
+
+      DOUBLE PRECISION::ZERO,ONE,TWO,THREE,FOUR,FIVE
+      PARAMETER (ZERO=0.D0,ONE=1.D0,TWO=2.D0,THREE=3.D0,FOUR=4.D0,
+     *    FIVE=5.D0)
+
+Blocks can be nested:
+
+   $block $local $T tab%tree
+      $block $local $N $T%node
+         rpos=$N($N(this_node)%r)%tab_pos
+      $endblock
+   $endblock
+
+expands to
+
+         rpos=tab%tree%node(tab%tree%node(this_node)%r)%tab_pos
+
+
+=item $str(I<text>)
+
+Generates a Fortran string with the translation of I<text>.
+A shorter syntax for this is $"I<text>".
+
+=item $fprog I<text> $endfprog
+
+The interior text is evaluated and passed to a Fortran compiler. The generated program
+is executed and the result is inserted in the output stream. There are several ways to
+influence the compilation: 1. with the $FC_CMD macro where the terms INPUT and OUTPUT
+must be present (they are place-holders that are replaced internally
+with temporary filenames), 2. with the $FC and $FC_ARGS (optional) macros (used as
+"C<$FC $FC_ARGS -o OUTPUT INPUT>"), or 3. with the environment
+variables FC and FC_ARGS instead of macros. If all cases are inapplicable then
+fpx3 tries to guess the right compiler invocation for the current operating system.
+Example:
+
+   $fprog
+     $local $kind 4
+     $local $real real($kind)
+     program test 
+     $real::x
+     x=sqrt(2.0_$kind)
+     print*,$str($real,parameter::x=),x
+     end program test
+   $end fprog
+
+translates to
+
+   real(4),parameter::x=   1.414214
+
+The program/end program statements are generated automatically if not present:
+
+   real(8)::y=$fprog print*,sqrt(3.0_8) $end fprog
+
+translates to
+
+   real(8)::y=   1.73205080756888
+
+On systems with slow IO it is recommended to do all the machine dependent Fortran
+initializations in one all-inclusive embedded Fortran program (the generated
+constants should be global by nature anyway). $fprog regions can be nested like
+$block regions.
+
+=item $fval I<text> $endfval  |  $fval(I<text>)  |  $fval: I<line> EOL
+
+Similar to $fprog for a single expression.
+
+   real(8)::y=$fprog print*,sqrt(3.0_8) $end fprog
+
+can be written as
+
+   real(8)::y=$fval(sqrt(3.0_8))
+
+
+=item $discard [I<label> EOL] I<text> $undiscard [I<label>]
+
+The interior I<text> is unconditionally discarded. Example:
+
+   $discard UNUSED
+      dead code
+   $undiscard UNUSED
+
+=item $eof
+
+Behaves like the physical end of the current file if evaluated.
+
+   $if (defined $have_xyz_config) $eof $endif
+   $define $have_xyz_config 1
+   ! define xyz_config
+
+=item $newline
+
+Simply adds a newline - helpful for writing macros on one line.
+
+=item $file_name
+
+The name of the current input file.
+
+=item $line_num
+
+Current input line number.
+
+=item $fixed_form
+
+If defined, input is treated as fixed Fortran source.
+Corresponds to the -free / -fixed command flag.
+
+=item $max_line_length
+
+Maximal Fortran line length. Influences when output lines are broken.
+Default is 72 for fixed form and 132 for free form.
+
+=item $env(I<text>)
+
+Evaluates I<text> and returns the respective process environment value (like $eval($ENV{I<text>}) ).
+
+=item $context_doc
+
+Evaluates to a short info about the Fortran context. E.g., in the code
+
+   module test_mod
+     contains
+     subroutine test_sub
+       contains
+       subroutine test_isub
+         print*,$str(start $context_doc)
+       end subroutine test_isub
+     end subroutine test_sub
+   end module test_mod
+
+the print statement translates to
+
+         print*,'start <test_mod:test_sub:test_isub>'
+
+=item $this_module
+
+Gives the name of the current module.
+
+=item $used_modules
+
+A comma separated list of used modules.
+
+=item $init_modules | $init_modules(I<text>)
+
+Expands to Fortran calls to init-subroutines for all used modules.
+Example:
+
+   module test
+     use subtest1
+     use subtest2
+     contains
+     subroutine init_$this_module(istate)
+       $init_modules(istate)
+     end subroutine init_$this_module
+   end module test
+
+expands to
+
+   module test
+     use subtest1
+     use subtest2
+     contains
+     subroutine init_test(istate)
+         call init_subtest1(istate)
+         call init_subtest2(istate)
+     end subroutine init_test
+   end module test
+
+=item $LHS
+
+The left hand side of the current Fortran assignment statement.
+Generates an error outside assignments. E.g.:
+
+   this_state(i,j,k)=IBSET($LHS,this_flag)
+
+translates to
+
+   this_state(i,j,k)=IBSET(this_state(i,j,k),this_flag) 
+
+=item $attribute I<attribute> EOL I<text> $endattribute
+
+In I<text> every Fortran relevant term '::' is changed to ',I<attribute>::'.
+The current attribute is stored in $attribute_value. Attributes can be nested.
+Example:
+
+   $attribute private,save
+      integer::ix,iy,iz
+      real(dp_kind)::rx,ry,rz
+   $attribute dimension(:),allocatable
+      real(dp_kind)::vec
+   $end attribute
+   $end attribute
+
+translates to
+
+      integer,private,save::ix,iy,iz
+      real(dp_kind),private,save::rx,ry,rz
+      real(dp_kind),private,save,dimension(:),allocatable::vec
+
+=item $warn(I<text>)
+
+Generates a warning message stderr.
+
+=item $error(I<text>)
+
+Generates an error message on stderr and exits fpx3.
+
+
+=item $i[kind]_[function], $r[kind]_[function], $[i|l|r|z]_kind
+
+These macros correspond to numeric enquiry functions of Fortran90. They are
+determined via a set of test programs that are translated with the current Fortran
+compiler command (see $fprog). The results are cached and only updated when
+the hostname or the compiler invocation changes. The available functions are
+B<bit_size, digits, huge, radix, range> for integers and
+B<digits, epsilon, huge, maxexponent, minexponent, radix, range, tiny> for reals.
+Examples:
+
+Default kinds of integer,logical,real,complex:
+
+   $i_kind, $l_kind, $r_kind, $z_kind
+
+Check if real(16) is available:
+
+   $ifdef $r16_kind
+      integer,parameter::my_r_kind=16
+   $else
+      integer,parameter::my_r_kind=8
+   $endif
+
+The bit_size of default integer:
+
+   $i_bit_size
+
+=item $map($sub I<text> $endsub, arg1,arg2,...)
+
+The first argument of map must be an unnamed fpx3-sub. It is applied to each of the following
+arguments. Example:
+
+   $map($sub print*,$str($1 =),eat_sum%$1 * tmp $newline $endsub,t,p,xc,coul,con,etot)
+
+expands to
+
+      print*,'t =',eat_sum%t * tmp
+      print*,'p =',eat_sum%p * tmp
+      print*,'xc =',eat_sum%xc * tmp
+      print*,'coul =',eat_sum%coul * tmp
+      print*,'con =',eat_sum%con * tmp
+      print*,'etot =',eat_sum%etot * tmp
+
+
+=item $map2($sub I<text> $endsub, arg1,arg2,...)
+
+Like map - but here the arguments after the sub are treated as comma separated lists.
+All lists are splitted and combined to one big list of arguments. Example:
+
+   program test
+     $define $list1 1,2
+     $define $list2 3
+     $map2($sub call my_func($1) $newline $endsub,$list1,$list2)
+   end program test
+
+expands to
+
+   program test
+      call my_func(1)
+      call my_func(2)
+      call my_func(3)
+   end program test
+
+program test
+
+=back
+
+=head2 End-of-line Conditionals
+
+These are simple shortcuts for already existing conditionals.
+The form is $I<name> I<modifier> EOL. They are
+not active inside quote-, Perl-, comment-, or string-context.
+The special meaning only applies to free source form:
+
+In the following, SOL means I<start of line>.
+
+=over 4
+
+=item $I<name>* EOL
+
+Same as SOL $if (defined $I<name>) I<line> EOL $endif. E.g.:
+
+   any_statement
+   call only_for_mpi() $mpi*
+   any_statement
+
+=item $I<name>+ EOL I<text> $I<name>- EOL
+
+Same as SOL $if (defined $I<name>) I<line> EOL I<text> $endif. E.g.:
+
+   any_statement
+   first_mpi_statement $mpi+
+   second_mpi_statement
+   last_mpi_statement  $mpi-
+   any_statement
+
+=back
+
+=head2 Other Shortcuts
+
+=over 4
+
+=item $(I<perl_exp>)   :=   $eval(I<perl_exp>)
+
+=item $()  can be used as zero wide separator
+
+=item $: I<perl_line> EOL   :=   $eval: I<perl_line> EOL
+
+=item $ifdef I<perl_line>   :=   $if (defined I<perl_line>)
+
+=item $ifndef I<perl_line>   :=   $if (!defined I<perl_line>)
+
+=item $platform   :=   $($ENV{PLATFORM} || $^O)
+
+=item $hostname   :=   $(`hostname`)
+
+=item $rem I<line> EOL   :=   $discard I<line> $undiscard EOL
+
+=item $dnl I<line> EOL   :=   $discard I<line> EOL $undiscard
+
+=back
+
+=head2 Macro access within Perl
+
+You probably don't need to care about what is said in this section unless you
+really want to get involved with Perl.
+
+=over 4
+
+=item Constant scalars
+
+Constant scalars are directly accessible from Perl. E.g.,
+
+   $perl: $five=0b0101; $fpx3="f" . "p" x 3
+
+assigns the value 5 to $five and fppp to $fpx3. 
+
+=item Simple functional macros
+
+Functional macro definitions in Perl can be done using the supplied B<macro> subroutine:
+
+   $perl: $count=0; macro $counter, sub { $count=$count+1; return $count }
+   integer:: i$counter,i$counter,i$counter,i$counter
+
+This ties the anonymous sub to the scalar $counter. Every access to
+$counter executes the sub. The result is:
+
+   integer:: i1,i2,i3,i4
+
+=item Functional macros with arguments
+
+Macro arguments are not collected automatically. You need to call B<get_args()>.
+E.g.:
+
+   $perl
+   macro $stop, sub {
+     my @a=get_args();
+     err("bad usage of stop macro") if scalar @a > 1;
+     return "call my_stop(@a)" if @a;
+     return "call my_stop(\'$context_doc\')";
+   };
+   $endperl
+
+Simple functional macros like this take their arguments only from the input stream.
+They cannot be used inside a Perl expression. E.g.,
+
+   $eval: $stop('message') # leads to a Perl syntax error
+
+=item General functional macros
+
+To be more general use the slightly more complicated B<xmacro>:
+
+   $perl
+   xmacro 'stop', sub {
+     my @a=@_; @a=get_args() unless @a;
+     err("bad usage of stop macro") if scalar @a > 1;
+     return "call my_stop(@a)" if @a;
+     return "call my_stop(\'$context_doc\')";
+   };
+   $endperl
+
+Here $stop('message') is equivalent to the Perl call $eval(&$stop("'message'")).
+
+=back
+
+=head1 Examples
+
+This section shows how to solve some common tasks. The
+examples should be transferable without Perl background.
+
+=over 4
+
+=item stringwise/numerical comparision
+
+   $if ($var1 eq $var2) ... $endif
+   $if ($var1 lt "this text constant") ... $endif
+
+The stringwise comparision operators are: B<eq> (equal),  B<ne> (not equal),
+B<lt> (less than), B<gt> (greater than), B<le> (less than or equal) and
+B<ge> (greater than or equal). For numerical comparision use:
+B<E<lt>>, B<E<gt>>, B<E<lt>=>, B<E<gt>=>, B<==>, B<!=>.
+
+=item string matching
+
+   $define $FC mpxlf95
+   $if ($FC =~ /xlf/) ... $endif
+
+The logical expression is true if $FC contains the string "xlf".
+
+=item external programs
+
+   $: `my_program my_args`
+
+Use backticks around the program call. Here the output is directly inserted in the output stream.
+
+=item integer/floating-point arithmetic
+
+   $: 7/3
+
+evaluates to 2.33333333333333
+
+   $: use integer; 7/3
+
+evaluates to 2.
+
+=back
+
+=head1 Bugs
+
+The core of fpx3 has left the experimental state and is stable for some time now.
+But newer features may carry new problems. Please send bugs and comments to
+jbehren at gwdg dot de (translate at and dot, ignore whitespace).
+
+=head1 See also
+
+ perl(1) and references therein,
+ cpp(1), m4(1), fweb(1), f90ppr(1), coco(1)
+
+=head1 Copying
+
+ This documentation is part of the fpx3 program.
+ Copyright (c) 2002-2004, Jörg Behrens. All rights reserved.
+ fpx3 is free software; you can redistribute it
+ and/or modify it under the same terms as Perl itself.
+
+=cut

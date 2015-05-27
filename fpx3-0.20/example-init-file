@@ -1,0 +1,86 @@
+#
+# example initialization file for fpx3
+#
+# requires:
+#   integer,parameter::dp_kind,qp_kind,string_len:
+#
+
+$dp="real(dp_kind)";
+$dp0="0.0_dp_kind";
+$qp="real(qp_kind)";
+$qp0="0.0_qp_kind";
+$string="character(len=string_len)";
+$dpc="complex(dp_kind)";
+$dpc0="cmplx(0.0_dp_kind,0.0_dp_kind,dp_kind)";
+$qpc="complex(qp_kind)";
+$qpc0="cmplx(0.0_qp_kind,0.0_qp_kind,qp_kind)";
+
+macro $p, sub {
+  my $t=join(',',get_args());
+  return "print*,\'$t=\',$t" if $t;
+  return "print";
+};
+
+
+macro $start_msg, sub {
+  return "print*,\'start $context_doc\'";
+};
+
+macro $end_msg, sub {
+  return "print*,\'end $context_doc\'";
+};
+
+macro $stop, sub {
+  my @a=get_args();
+  err("bad usage of stop macro") if scalar @a > 1;
+  return "stop \'@a\'" if @a;
+  return "stop \'$context_doc\'";
+};
+
+macro $bad_case, sub {
+  my $s="$context_doc (file $file_name, line $line_num)";
+  return "
+      print*,\'unexpected case\'
+      stop \'$s\'
+	";
+};
+
+sub f_indent {
+  my $v="";
+
+  while (1) {
+
+    $_[0] =~ /\G[ \t\r\f]*\n/gc && next;
+
+    $_[0] =~ /\G(?:[ \t\r\f]*)([^\n]*\n)/gc && do {
+      $v .= "      $1";
+      next;
+    };
+
+    $_[0] =~ /\G(?:[ \t\r\f]*)([^\n]+)/gc && do {
+      $v .= "      $1\n";
+      next;
+    };
+
+    last;
+  }
+  return $v;
+}
+
+macro $crash, sub {
+  my $s="file $file_name, line $line_num";
+  my $t="";
+  my @a=get_args();
+  if (@a) {
+    $t=f_indent("if (@a) then
+                    print*,\'Error in $s:\'
+                    print*,\'@a\'
+                    stop \'$s\'
+                 endif");
+  } else {
+    $t=f_indent("print*,\'Error in $s\'
+                 stop \'$s\'");
+  }
+  return $t;
+};
+

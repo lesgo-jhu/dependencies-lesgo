@@ -1,0 +1,945 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+<title>fpx3</title>
+<link rev="made" href="mailto:feedback@suse.de" />
+</head>
+
+<body style="background-color: white">
+
+<p><a name="__index__"></a></p>
+<!-- INDEX BEGIN -->
+
+<ul>
+
+	<li><a href="#fpx3__fortran_preprocessor_with_embedded_perl">Fpx3 - Fortran Preprocessor with embedded Perl</a></li>
+	<li><a href="#usage_">Usage:</a></li>
+	<li><a href="#options_">Options:</a></li>
+	<li><a href="#description_">Description:</a></li>
+	<ul>
+
+		<li><a href="#directives_and_standard_macros">Directives and Standard Macros</a></li>
+		<li><a href="#endofline_conditionals">End-of-line Conditionals</a></li>
+		<li><a href="#other_shortcuts">Other Shortcuts</a></li>
+		<li><a href="#macro_access_within_perl">Macro access within Perl</a></li>
+	</ul>
+
+	<li><a href="#examples">Examples</a></li>
+	<li><a href="#bugs">Bugs</a></li>
+	<li><a href="#see_also">See also</a></li>
+	<li><a href="#copying">Copying</a></li>
+</ul>
+<!-- INDEX END -->
+
+<hr />
+<p>
+</p>
+<h1><a name="fpx3__fortran_preprocessor_with_embedded_perl">Fpx3 - Fortran Preprocessor with embedded Perl</a></h1>
+<p>The purpose of fpx3 is to simplify Fortran source code development with
+an integrated set of macros, directives and embedded Perl/Fortran.
+Most common tasks can be done without Perl background using the documented
+examples. For sophisticated source code transformations Perls broad functionality
+can be used. Embedded Fortran can be used for general data initialization.
+There is support for Fortran context sensitive macros and local name spaces.
+Structural and dependency information for subsequent tools can be generated.</p>
+<p>Fpx3 is probably most useful for large projects with nontrivial hardware and
+software dependencies.
+It is written in pure Perl and should run on many platforms (tested
+on AIX, Linux, Tru64 UNIX, Windows NT).</p>
+<p>The latest version should be available at <a href="http://www.gwdg.de/~jbehren/fpx3">http://www.gwdg.de/~jbehren/fpx3</a> .</p>
+<p>
+</p>
+<hr />
+<h1><a name="usage_">Usage:</a></h1>
+<p>fpx3 [<strong>-d</strong>] [<strong>-D</strong><em>name</em>[=<em>value</em>]] [<strong>-free</strong> | <strong>-fixed</strong>] [<strong>-[no]dh</strong>]
+        [<strong>-[no]fo</strong>] [<strong>-[no]sh</strong>] [<strong>-h</strong>] [<strong>-i</strong> <em>initfile</em>] [<strong>-I</strong><em>path</em>]
+        [<strong>-lc</strong>] [<strong>-o</strong> <em>ofile</em>] [<strong>-v</strong>] [<em>file list</em>]</p>
+<p>
+</p>
+<hr />
+<h1><a name="options_">Options:</a></h1>
+<dl>
+<dt><strong><a name="item__2dd">-d</a></strong><br />
+</dt>
+<dd>
+Print debug information on stderr.
+</dd>
+<p></p>
+<dt><strong><a name="item__2ddname_5b_3dvalue_5d">-D<em>name</em>[=<em>value</em>]</a></strong><br />
+</dt>
+<dd>
+Defines $<em>name</em> with <em>value</em> if specified, else with 1.
+</dd>
+<p></p>
+<dt><strong><a name="item__2dfree__7c__2dfixed">-free | -fixed</a></strong><br />
+</dt>
+<dd>
+Assumes source code is in free (default) or fixed form.
+</dd>
+<p></p>
+<dt><strong><a name="item__2d_5bno_5ddh_or__2d_5b_21_5dgd">-[no]dh or -[!]gd</a></strong><br />
+</dt>
+<dd>
+Generate dependency header (default).
+</dd>
+<p></p>
+<dt><strong><a name="item__2d_5bno_5dfo_or__2d_5b_21_5dgf">-[no]fo or -[!]gf</a></strong><br />
+</dt>
+<dd>
+Generate Fortran output (default).
+</dd>
+<p></p>
+<dt><strong><a name="item__2dno_5bsh_5d_or__2d_5b_21_5dgs">-no[sh] or -[!]gs</a></strong><br />
+</dt>
+<dd>
+Generate structure header.
+</dd>
+<p></p>
+<dt><strong><a name="item__2dlc">-lc</a></strong><br />
+</dt>
+<dd>
+Insert cpp-like line control information for the Fortran compiler,
+the style depends on the the value of $FC.
+</dd>
+<p></p>
+<dt><strong><a name="item__2di_initfile">-i <em>initfile</em></a></strong><br />
+</dt>
+<dd>
+Read the initialization file <em>initfile</em> and interpret it as Perl code.
+Default is the file <strong>.fpx3</strong>
+in the current directory, if present. Otherwise the file <strong>~/.fpx3</strong> is tried.
+An example initialization file is distributed with this program.
+</dd>
+<p></p>
+<dt><strong><a name="item__2di_path">-I <em>path</em></a></strong><br />
+</dt>
+<dd>
+Use <em>path</em> when searching for include files via $include.
+It is interpreted as sequence of colon (unix) or semicolon
+(windows) separated directories.
+Can be accessed as $include_path.
+</dd>
+<p></p>
+<dt><strong><a name="item__2do_ofile">-o <em>ofile</em></a></strong><br />
+</dt>
+<dd>
+Write output to the file <em>ofile</em> instead of stdout.
+</dd>
+<p></p>
+<dt><strong><a name="item__2dv">-v</a></strong><br />
+</dt>
+<dd>
+Show version and exit.
+</dd>
+<p></p>
+<dt><strong><a name="item_file_list"><em>file list</em></a></strong><br />
+</dt>
+<dd>
+The special filename '-' means reading from stdin. Stdin is also
+used when the file list is empty.
+</dd>
+<p></p></dl>
+<p>
+</p>
+<hr />
+<h1><a name="description_">Description:</a></h1>
+<p>All fpx3 macros start with the <strong>$</strong> character. This gives a non-ambiguous name space
+and makes reading Fortran source code with embedded macros easy.
+Macros can hold multi line constants,
+Perl subroutines or fpx3 subroutines. They are not expanded inside
+Fortran comments or strings. Evaluation of an undefined macro causes an error.
+The result of a macro expansion is not expanded again but treated as Fortran code.
+Standard macros of the form <code>$endfoo</code> can be written with spaces between
+<code>$end</code> and <code>foo</code>.</p>
+<p>This document is written with the following convention:</p>
+<p>EOL := end of line</p>
+<p><em>name</em> := alphanumeric string</p>
+<p><em>perl_exp</em> := any Perl expression</p>
+<p><em>perl_line</em> := single line Perl expression, excluding EOL</p>
+<p><em>text</em> := one or more lines</p>
+<p><em>line</em> := rest of line, excluding EOL</p>
+<p>Macros can be accessed as $<em>name</em> or ${<em>name</em>}, for simplicity the second
+form is not mentioned explicitly in the following definitions.</p>
+<p>
+</p>
+<h2><a name="directives_and_standard_macros">Directives and Standard Macros</a></h2>
+<dl>
+<dt><strong><a name="item_define">$define($<em>name</em>,<em>text</em> [[,$<em>name</em>,<em>text</em>]...])  |  $define $<em>name</em> <em>line</em> EOL</a></strong><br />
+</dt>
+<dd>
+Expands the second argument and assigns it to $<em>name</em>. E.g.:
+</dd>
+<dd>
+<pre>
+   $define $x 1
+   $define $y $x$x</pre>
+</dd>
+<dd>
+<p>This assigns 1 to $x and 11 to $y.</p>
+</dd>
+<p></p>
+<dt><strong><a name="item__24undefine__24name">$undefine $<em>name</em></a></strong><br />
+</dt>
+<dd>
+Removes the definition of $<em>name</em> in the current scope.
+See $block and $sub for local scopes.
+</dd>
+<p></p>
+<dt><strong><a name="item_eval">$eval <em>perl_exp</em> $endeval  |  $eval(<em>perl_exp</em>)  |  $eval: <em>perl_line</em> EOL</a></strong><br />
+</dt>
+<dd>
+Evaluates the Perl expression in the user name space.
+Use the less fragile long form if fpx3 complains about unbalanced brackets.
+Example:
+</dd>
+<dd>
+<pre>
+   $define $pi 3.1415926535897932
+   $eval:sqrt(2)*sin($pi/4)</pre>
+</dd>
+<dd>
+<p>expands to 1.</p>
+</dd>
+<dd>
+<p>Embedded Perl is fast since it is evaluated inside the already running
+interpreter without IO overhead.</p>
+</dd>
+<p></p>
+<dt><strong><a name="item_perl">$perl <em>perl_exp</em> $endperl  |  $perl(<em>perl_exp</em>)   | $perl: <em>perl_line</em> EOL</a></strong><br />
+</dt>
+<dd>
+Like $eval but without result unless a return statement is used. E.g.:
+</dd>
+<dd>
+<pre>
+   $perl: $x=1; $y=2</pre>
+</dd>
+<dd>
+<p>is identical to</p>
+</dd>
+<dd>
+<pre>
+   $eval: $x=1; $y=2; return &quot;&quot;</pre>
+</dd>
+<dd>
+<p>and does the same as</p>
+</dd>
+<dd>
+<pre>
+   $define $x 1
+   $define $y 2</pre>
+</dd>
+<dd>
+<p>And</p>
+</dd>
+<dd>
+<pre>
+   $perl: return &quot;$x$y&quot;</pre>
+</dd>
+<dd>
+<p>is identical to</p>
+</dd>
+<dd>
+<pre>
+   $eval: &quot;$x$y&quot;</pre>
+</dd>
+<dd>
+<p>and does the same as</p>
+</dd>
+<dd>
+<pre>
+   $x$y</pre>
+</dd>
+<p></p>
+<dt><strong><a name="item_if">$if (<em>perl_exp</em>) <em>text</em>
+[[$elsif (<em>perl_exp</em>) <em>text</em>]...]
+[$else <em>text</em>]
+$endif</a></strong><br />
+</dt>
+<dd>
+Selects and evaluates the appropriate branch.
+Enclosing brackets (...) are not required if EOL
+close is meant. Example:
+</dd>
+<dd>
+<pre>
+   $if $platform eq &quot;IBM.RS6000&quot;
+      $define $LOC  LOC
+   $else
+      $define $LOC %LOC
+   $endif</pre>
+</dd>
+<p></p>
+<dt><strong><a name="item__24quote_text__24endquote">$quote <em>text</em> $endquote</a></strong><br />
+</dt>
+<dd>
+Evaluates to the quoted (raw) <em>text</em>.
+</dd>
+<p></p>
+<dt><strong><a name="item__24include_filenames">$include <em>filenames</em></a></strong><br />
+</dt>
+<dd>
+Reads the files and evaluates them. Updates the dependency list.
+</dd>
+<p></p>
+<dt><strong><a name="item__24local">$local</a></strong><br />
+</dt>
+<dd>
+Like $define, but the scope is local to the $sub, $block or $fprog region.
+</dd>
+<p></p>
+<dt><strong><a name="item__24define__24name__24sub_text__24endsub">$define $<em>name</em> $sub <em>text</em> $endsub</a></strong><br />
+</dt>
+<dd>
+Defines a macro that can be called with arguments. The evaluation takes
+place when $<em>name</em> is used. Arguments are available as $0,$1,$2,...
+with $0 set to the macro name. $* gives the comma separated argument list
+and $# evaluates to the highest argument index. $shift returns $0 and
+shifts the other arguments one index down.
+E.g.:
+</dd>
+<dd>
+<pre>
+ $define $pot32 $sub
+   $local $name $0$1
+   $local $type $1
+   $type function $name(a)
+     $type,intent(in)::a
+     $name=sqrt(a)**3
+   end function $name
+ $endsub</pre>
+</dd>
+<dd>
+<p>$pot32(real) evaluates to</p>
+</dd>
+<dd>
+<pre>
+   real function pot32real(a)
+     real,intent(in)::a
+     pot32real=sqrt(a)**3
+   end function pot32real</pre>
+</dd>
+<p></p>
+<dt><strong><a name="item__24block_text__24endblock">$block <em>text</em> $endblock</a></strong><br />
+</dt>
+<dd>
+Evaluates interior text. $local is supported. Example:
+</dd>
+<dd>
+<pre>
+   $define $const $block
+      $local $p DOUBLE PRECISION
+      $local $e .D0
+      $p::ZERO,ONE,TWO,THREE,FOUR,FIVE
+      PARAMETER (ZERO=0$e,ONE=1$e,TWO=2$e,THREE=3$e,FOUR=4$e,
+     *    FIVE=5$e)
+   $endblock</pre>
+</dd>
+<dd>
+<p>$const evaluates to</p>
+</dd>
+<dd>
+<pre>
+      DOUBLE PRECISION::ZERO,ONE,TWO,THREE,FOUR,FIVE
+      PARAMETER (ZERO=0.D0,ONE=1.D0,TWO=2.D0,THREE=3.D0,FOUR=4.D0,
+     *    FIVE=5.D0)</pre>
+</dd>
+<dd>
+<p>Blocks can be nested:</p>
+</dd>
+<dd>
+<pre>
+   $block $local $T tab%tree
+      $block $local $N $T%node
+         rpos=$N($N(this_node)%r)%tab_pos
+      $endblock
+   $endblock</pre>
+</dd>
+<dd>
+<p>expands to</p>
+</dd>
+<dd>
+<pre>
+         rpos=tab%tree%node(tab%tree%node(this_node)%r)%tab_pos</pre>
+</dd>
+<p></p>
+<dt><strong><a name="item_str">$str(<em>text</em>)</a></strong><br />
+</dt>
+<dd>
+Generates a Fortran string with the translation of <em>text</em>.
+A shorter syntax for this is $``<em>text</em>''.
+</dd>
+<p></p>
+<dt><strong><a name="item__24fprog_text__24endfprog">$fprog <em>text</em> $endfprog</a></strong><br />
+</dt>
+<dd>
+The interior text is evaluated and passed to a Fortran compiler. The generated program
+is executed and the result is inserted in the output stream. There are several ways to
+influence the compilation: 1. with the $FC_CMD macro where the terms INPUT and OUTPUT
+must be present (they are place-holders that are replaced internally
+with temporary filenames), 2. with the $FC and $FC_ARGS (optional) macros (used as
+``<code>$FC $FC_ARGS -o OUTPUT INPUT</code>''), or 3. with the environment
+variables FC and FC_ARGS instead of macros. If all cases are inapplicable then
+fpx3 tries to guess the right compiler invocation for the current operating system.
+Example:
+</dd>
+<dd>
+<pre>
+   $fprog
+     $local $kind 4
+     $local $real real($kind)
+     program test 
+     $real::x
+     x=sqrt(2.0_$kind)
+     print*,$str($real,parameter::x=),x
+     end program test
+   $end fprog</pre>
+</dd>
+<dd>
+<p>translates to</p>
+</dd>
+<dd>
+<pre>
+   real(4),parameter::x=   1.414214</pre>
+</dd>
+<dd>
+<p>The program/end program statements are generated automatically if not present:</p>
+</dd>
+<dd>
+<pre>
+   real(8)::y=$fprog print*,sqrt(3.0_8) $end fprog</pre>
+</dd>
+<dd>
+<p>translates to</p>
+</dd>
+<dd>
+<pre>
+   real(8)::y=   1.73205080756888</pre>
+</dd>
+<dd>
+<p>On systems with slow IO it is recommended to do all the machine dependent Fortran
+initializations in one all-inclusive embedded Fortran program (the generated
+constants should be global by nature anyway). $fprog regions can be nested like
+$block regions.</p>
+</dd>
+<p></p>
+<dt><strong><a name="item_fval">$fval <em>text</em> $endfval  |  $fval(<em>text</em>)  |  $fval: <em>line</em> EOL</a></strong><br />
+</dt>
+<dd>
+Similar to $fprog for a single expression.
+</dd>
+<dd>
+<pre>
+   real(8)::y=$fprog print*,sqrt(3.0_8) $end fprog</pre>
+</dd>
+<dd>
+<p>can be written as</p>
+</dd>
+<dd>
+<pre>
+   real(8)::y=$fval(sqrt(3.0_8))</pre>
+</dd>
+<p></p>
+<dt><strong><a name="item__24discard__5blabel_eol_5d_text__24undiscard__5bla">$discard [<em>label</em> EOL] <em>text</em> $undiscard [<em>label</em>]</a></strong><br />
+</dt>
+<dd>
+The interior <em>text</em> is unconditionally discarded. Example:
+</dd>
+<dd>
+<pre>
+   $discard UNUSED
+      dead code
+   $undiscard UNUSED</pre>
+</dd>
+<p></p>
+<dt><strong><a name="item__24eof">$eof</a></strong><br />
+</dt>
+<dd>
+Behaves like the physical end of the current file if evaluated.
+</dd>
+<dd>
+<pre>
+   $if (defined $have_xyz_config) $eof $endif
+   $define $have_xyz_config 1
+   ! define xyz_config</pre>
+</dd>
+<p></p>
+<dt><strong><a name="item__24newline">$newline</a></strong><br />
+</dt>
+<dd>
+Simply adds a newline - helpful for writing macros on one line.
+</dd>
+<p></p>
+<dt><strong><a name="item__24file_name">$file_name</a></strong><br />
+</dt>
+<dd>
+The name of the current input file.
+</dd>
+<p></p>
+<dt><strong><a name="item__24line_num">$line_num</a></strong><br />
+</dt>
+<dd>
+Current input line number.
+</dd>
+<p></p>
+<dt><strong><a name="item__24fixed_form">$fixed_form</a></strong><br />
+</dt>
+<dd>
+If defined, input is treated as fixed Fortran source.
+Corresponds to the -free / -fixed command flag.
+</dd>
+<p></p>
+<dt><strong><a name="item__24max_line_length">$max_line_length</a></strong><br />
+</dt>
+<dd>
+Maximal Fortran line length. Influences when output lines are broken.
+Default is 72 for fixed form and 132 for free form.
+</dd>
+<p></p>
+<dt><strong><a name="item_env">$env(<em>text</em>)</a></strong><br />
+</dt>
+<dd>
+Evaluates <em>text</em> and returns the respective process environment value (like $eval($ENV{<em>text</em>}) ).
+</dd>
+<p></p>
+<dt><strong><a name="item__24context_doc">$context_doc</a></strong><br />
+</dt>
+<dd>
+Evaluates to a short info about the Fortran context. E.g., in the code
+</dd>
+<dd>
+<pre>
+   module test_mod
+     contains
+     subroutine test_sub
+       contains
+       subroutine test_isub
+         print*,$str(start $context_doc)
+       end subroutine test_isub
+     end subroutine test_sub
+   end module test_mod</pre>
+</dd>
+<dd>
+<p>the print statement translates to</p>
+</dd>
+<dd>
+<pre>
+         print*,'start &lt;test_mod:test_sub:test_isub&gt;'</pre>
+</dd>
+<p></p>
+<dt><strong><a name="item__24this_module">$this_module</a></strong><br />
+</dt>
+<dd>
+Gives the name of the current module.
+</dd>
+<p></p>
+<dt><strong><a name="item__24used_modules">$used_modules</a></strong><br />
+</dt>
+<dd>
+A comma separated list of used modules.
+</dd>
+<p></p>
+<dt><strong><a name="item_init_modules">$init_modules | $init_modules(<em>text</em>)</a></strong><br />
+</dt>
+<dd>
+Expands to Fortran calls to init-subroutines for all used modules.
+Example:
+</dd>
+<dd>
+<pre>
+   module test
+     use subtest1
+     use subtest2
+     contains
+     subroutine init_$this_module(istate)
+       $init_modules(istate)
+     end subroutine init_$this_module
+   end module test</pre>
+</dd>
+<dd>
+<p>expands to</p>
+</dd>
+<dd>
+<pre>
+   module test
+     use subtest1
+     use subtest2
+     contains
+     subroutine init_test(istate)
+         call init_subtest1(istate)
+         call init_subtest2(istate)
+     end subroutine init_test
+   end module test</pre>
+</dd>
+<p></p>
+<dt><strong><a name="item__24lhs">$LHS</a></strong><br />
+</dt>
+<dd>
+The left hand side of the current Fortran assignment statement.
+Generates an error outside assignments. E.g.:
+</dd>
+<dd>
+<pre>
+   this_state(i,j,k)=IBSET($LHS,this_flag)</pre>
+</dd>
+<dd>
+<p>translates to</p>
+</dd>
+<dd>
+<pre>
+   this_state(i,j,k)=IBSET(this_state(i,j,k),this_flag)</pre>
+</dd>
+<p></p>
+<dt><strong><a name="item__24attribute_attribute_eol_text__24endattribute">$attribute <em>attribute</em> EOL <em>text</em> $endattribute</a></strong><br />
+</dt>
+<dd>
+In <em>text</em> every Fortran relevant term '::' is changed to ',<em>attribute</em>::'.
+The current attribute is stored in $attribute_value. Attributes can be nested.
+Example:
+</dd>
+<dd>
+<pre>
+   $attribute private,save
+      integer::ix,iy,iz
+      real(dp_kind)::rx,ry,rz
+   $attribute dimension(:),allocatable
+      real(dp_kind)::vec
+   $end attribute
+   $end attribute</pre>
+</dd>
+<dd>
+<p>translates to</p>
+</dd>
+<dd>
+<pre>
+      integer,private,save::ix,iy,iz
+      real(dp_kind),private,save::rx,ry,rz
+      real(dp_kind),private,save,dimension(:),allocatable::vec</pre>
+</dd>
+<p></p>
+<dt><strong><a name="item_warn">$warn(<em>text</em>)</a></strong><br />
+</dt>
+<dd>
+Generates a warning message stderr.
+</dd>
+<p></p>
+<dt><strong><a name="item_error">$error(<em>text</em>)</a></strong><br />
+</dt>
+<dd>
+Generates an error message on stderr and exits fpx3.
+</dd>
+<p></p>
+<dt><strong><a name="item__24i_5bkind_5d__5bfunction_5d_2c__24r_5bkind_5d__5">$i[kind]_[function], $r[kind]_[function], $[i|l|r|z]_kind</a></strong><br />
+</dt>
+<dd>
+These macros correspond to numeric enquiry functions of Fortran90. They are
+determined via a set of test programs that are translated with the current Fortran
+compiler command (see $fprog). The results are cached and only updated when
+the hostname or the compiler invocation changes. The available functions are
+<strong>bit_size, digits, huge, radix, range</strong> for integers and
+<strong>digits, epsilon, huge, maxexponent, minexponent, radix, range, tiny</strong> for reals.
+Examples:
+</dd>
+<dd>
+<p>Default kinds of integer,logical,real,complex:</p>
+</dd>
+<dd>
+<pre>
+   $i_kind, $l_kind, $r_kind, $z_kind</pre>
+</dd>
+<dd>
+<p>Check if <code>real(16)</code> is available:</p>
+</dd>
+<dd>
+<pre>
+   $ifdef $r16_kind
+      integer,parameter::my_r_kind=16
+   $else
+      integer,parameter::my_r_kind=8
+   $endif</pre>
+</dd>
+<dd>
+<p>The bit_size of default integer:</p>
+</dd>
+<dd>
+<pre>
+   $i_bit_size</pre>
+</dd>
+<p></p>
+<dt><strong><a name="item_map">$map($sub <em>text</em> $endsub, arg1,arg2,...)</a></strong><br />
+</dt>
+<dd>
+The first argument of map must be an unnamed fpx3-sub. It is applied to each of the following
+arguments. Example:
+</dd>
+<dd>
+<pre>
+   $map($sub print*,$str($1 =),eat_sum%$1 * tmp $newline $endsub,t,p,xc,coul,con,etot)</pre>
+</dd>
+<dd>
+<p>expands to</p>
+</dd>
+<dd>
+<pre>
+      print*,'t =',eat_sum%t * tmp
+      print*,'p =',eat_sum%p * tmp
+      print*,'xc =',eat_sum%xc * tmp
+      print*,'coul =',eat_sum%coul * tmp
+      print*,'con =',eat_sum%con * tmp
+      print*,'etot =',eat_sum%etot * tmp</pre>
+</dd>
+<p></p>
+<dt><strong><a name="item_map2">$map2($sub <em>text</em> $endsub, arg1,arg2,...)</a></strong><br />
+</dt>
+<dd>
+Like map - but here the arguments after the sub are treated as comma separated lists.
+All lists are splitted and combined to one big list of arguments. Example:
+</dd>
+<dd>
+<pre>
+   program test
+     $define $list1 1,2
+     $define $list2 3
+     $map2($sub call my_func($1) $newline $endsub,$list1,$list2)
+   end program test</pre>
+</dd>
+<dd>
+<p>expands to</p>
+</dd>
+<dd>
+<pre>
+   program test
+      call my_func(1)
+      call my_func(2)
+      call my_func(3)
+   end program test</pre>
+</dd>
+<dd>
+<p>program test</p>
+</dd>
+<p></p></dl>
+<p>
+</p>
+<h2><a name="endofline_conditionals">End-of-line Conditionals</a></h2>
+<p>These are simple shortcuts for already existing conditionals.
+The form is $<em>name</em> <em>modifier</em> EOL. They are
+not active inside quote-, Perl-, comment-, or string-context.
+The special meaning only applies to free source form:</p>
+<p>In the following, SOL means <em>start of line</em>.</p>
+<dl>
+<dt><strong><a name="item__24name_2a_eol">$<em>name</em>* EOL</a></strong><br />
+</dt>
+<dd>
+Same as SOL $if (defined $<em>name</em>) <em>line</em> EOL $endif. E.g.:
+</dd>
+<dd>
+<pre>
+   any_statement
+   call only_for_mpi() $mpi*
+   any_statement</pre>
+</dd>
+<p></p>
+<dt><strong><a name="item__24name_2b_eol_text__24name_2d_eol">$<em>name</em>+ EOL <em>text</em> $<em>name</em>- EOL</a></strong><br />
+</dt>
+<dd>
+Same as SOL $if (defined $<em>name</em>) <em>line</em> EOL <em>text</em> $endif. E.g.:
+</dd>
+<dd>
+<pre>
+   any_statement
+   first_mpi_statement $mpi+
+   second_mpi_statement
+   last_mpi_statement  $mpi-
+   any_statement</pre>
+</dd>
+<p></p></dl>
+<p>
+</p>
+<h2><a name="other_shortcuts">Other Shortcuts</a></h2>
+<dl>
+<dt><strong>$(<em>perl_exp</em>)   :=   $eval(<em>perl_exp</em>)</strong><br />
+</dt>
+<dt><strong><a name="item__24_28_29_can_be_used_as_zero_wide_separator">$()  can be used as zero wide separator</a></strong><br />
+</dt>
+<dt><strong><a name="item__24_3a_perl_line_eol__3a_3d__24eval_3a_perl_line_e">$: <em>perl_line</em> EOL   :=   $eval: <em>perl_line</em> EOL</a></strong><br />
+</dt>
+<dt><strong>$ifdef <em>perl_line</em>   :=   $if (defined <em>perl_line</em>)</strong><br />
+</dt>
+<dt><strong>$ifndef <em>perl_line</em>   :=   $if (!defined <em>perl_line</em>)</strong><br />
+</dt>
+<dt><strong><a name="item__24platform__3a_3d__24_28_24env_7bplatform_7d__7c_">$platform   :=   $($ENV{PLATFORM} || $^O)</a></strong><br />
+</dt>
+<dt><strong><a name="item__24hostname__3a_3d__24_28_60hostname_60_29">$hostname   :=   $(`hostname`)</a></strong><br />
+</dt>
+<dt><strong><a name="item__24rem_line_eol__3a_3d__24discard_line__24undiscar">$rem <em>line</em> EOL   :=   $discard <em>line</em> $undiscard EOL</a></strong><br />
+</dt>
+<dt><strong><a name="item__24dnl_line_eol__3a_3d__24discard_line_eol__24undi">$dnl <em>line</em> EOL   :=   $discard <em>line</em> EOL $undiscard</a></strong><br />
+</dt>
+</dl>
+<p>
+</p>
+<h2><a name="macro_access_within_perl">Macro access within Perl</a></h2>
+<p>You probably don't need to care about what is said in this section unless you
+really want to get involved with Perl.</p>
+<dl>
+<dt><strong><a name="item_constant_scalars">Constant scalars</a></strong><br />
+</dt>
+<dd>
+Constant scalars are directly accessible from Perl. E.g.,
+</dd>
+<dd>
+<pre>
+   $perl: $five=0b0101; $fpx3=&quot;f&quot; . &quot;p&quot; x 3</pre>
+</dd>
+<dd>
+<p>assigns the value 5 to $five and fppp to $fpx3.</p>
+</dd>
+<p></p>
+<dt><strong><a name="item_simple_functional_macros">Simple functional macros</a></strong><br />
+</dt>
+<dd>
+Functional macro definitions in Perl can be done using the supplied <strong>macro</strong> subroutine:
+</dd>
+<dd>
+<pre>
+   $perl: $count=0; macro $counter, sub { $count=$count+1; return $count }
+   integer:: i$counter,i$counter,i$counter,i$counter</pre>
+</dd>
+<dd>
+<p>This ties the anonymous sub to the scalar $counter. Every access to
+$counter executes the sub. The result is:</p>
+</dd>
+<dd>
+<pre>
+   integer:: i1,i2,i3,i4</pre>
+</dd>
+<p></p>
+<dt><strong><a name="item_functional_macros_with_arguments">Functional macros with arguments</a></strong><br />
+</dt>
+<dd>
+Macro arguments are not collected automatically. You need to call <strong>get_args()</strong>.
+E.g.:
+</dd>
+<dd>
+<pre>
+   $perl
+   macro $stop, sub {
+     my @a=get_args();
+     err(&quot;bad usage of stop macro&quot;) if scalar @a &gt; 1;
+     return &quot;call my_stop(@a)&quot; if @a;
+     return &quot;call my_stop(\'$context_doc\')&quot;;
+   };
+   $endperl</pre>
+</dd>
+<dd>
+<p>Simple functional macros like this take their arguments only from the input stream.
+They cannot be used inside a Perl expression. E.g.,</p>
+</dd>
+<dd>
+<pre>
+   $eval: $stop('message') # leads to a Perl syntax error</pre>
+</dd>
+<p></p>
+<dt><strong><a name="item_general_functional_macros">General functional macros</a></strong><br />
+</dt>
+<dd>
+To be more general use the slightly more complicated <strong>xmacro</strong>:
+</dd>
+<dd>
+<pre>
+   $perl
+   xmacro 'stop', sub {
+     my @a=@_; @a=get_args() unless @a;
+     err(&quot;bad usage of stop macro&quot;) if scalar @a &gt; 1;
+     return &quot;call my_stop(@a)&quot; if @a;
+     return &quot;call my_stop(\'$context_doc\')&quot;;
+   };
+   $endperl</pre>
+</dd>
+<dd>
+<p>Here $stop('message') is equivalent to the Perl call $eval(&amp;$stop(``'message''')).</p>
+</dd>
+<p></p></dl>
+<p>
+</p>
+<hr />
+<h1><a name="examples">Examples</a></h1>
+<p>This section shows how to solve some common tasks. The
+examples should be transferable without Perl background.</p>
+<dl>
+<dt><strong><a name="item_stringwise_2fnumerical_comparision">stringwise/numerical comparision</a></strong><br />
+</dt>
+<dd>
+<pre>
+   $if ($var1 eq $var2) ... $endif
+   $if ($var1 lt &quot;this text constant&quot;) ... $endif</pre>
+</dd>
+<dd>
+<p>The stringwise comparision operators are: <strong>eq</strong> (equal),  <strong>ne</strong> (not equal),
+<strong>lt</strong> (less than), <strong>gt</strong> (greater than), <strong>le</strong> (less than or equal) and
+<strong>ge</strong> (greater than or equal). For numerical comparision use:
+<strong>&lt;</strong>, <strong>&gt;</strong>, <strong>&lt;=</strong>, <strong>&gt;=</strong>, <strong>==</strong>, <strong>!=</strong>.</p>
+</dd>
+<dt><strong><a name="item_string_matching">string matching</a></strong><br />
+</dt>
+<dd>
+<pre>
+   $define $FC mpxlf95
+   $if ($FC =~ /xlf/) ... $endif</pre>
+</dd>
+<dd>
+<p>The logical expression is true if $FC contains the string ``xlf''.</p>
+</dd>
+<dt><strong><a name="item_external_programs">external programs</a></strong><br />
+</dt>
+<dd>
+<pre>
+   $: `my_program my_args`</pre>
+</dd>
+<dd>
+<p>Use backticks around the program call. Here the output is directly inserted in the output stream.</p>
+</dd>
+<dt><strong><a name="item_integer_2ffloating_2dpoint_arithmetic">integer/floating-point arithmetic</a></strong><br />
+</dt>
+<dd>
+<pre>
+   $: 7/3</pre>
+</dd>
+<dd>
+<p>evaluates to 2.33333333333333</p>
+</dd>
+<dd>
+<pre>
+   $: use integer; 7/3</pre>
+</dd>
+<dd>
+<p>evaluates to 2.</p>
+</dd>
+</dl>
+<p>
+</p>
+<hr />
+<h1><a name="bugs">Bugs</a></h1>
+<p>The core of fpx3 has left the experimental state and is stable for some time now.
+But newer features may carry new problems. Please send bugs and comments to
+jbehren at gwdg dot de (translate at and dot, ignore whitespace).</p>
+<p>
+</p>
+<hr />
+<h1><a name="see_also">See also</a></h1>
+<pre>
+ perl(1) and references therein,
+ cpp(1), m4(1), fweb(1), f90ppr(1), coco(1)</pre>
+<p>
+</p>
+<hr />
+<h1><a name="copying">Copying</a></h1>
+<pre>
+ This documentation is part of the fpx3 program.
+ Copyright (c) 2002-2004, Jörg Behrens. All rights reserved.
+ fpx3 is free software; you can redistribute it
+ and/or modify it under the same terms as Perl itself.</pre>
+
+</body>
+
+</html>
