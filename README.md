@@ -1,7 +1,7 @@
 # dependencies-lesgo
 The dependencies used for lesgo
 
-These are the dependencies needed to compile lesgo.
+These are the dependencies needed to compile some legacy versions of lesgo.
 Some of them are no longer online so it might be hard to find them.
 
 1. fpx3
